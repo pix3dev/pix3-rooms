@@ -1,0 +1,45 @@
+## .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+project.lock.json
+project.fragment.lock.json
+artifacts/
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+BenchmarkDotNet.Artifacts/
+
+## Rider / VS / VS Code
+.idea/
+.vs/
+*.swp
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+
+## Local secrets and environment
+*.env
+.env.*
+appsettings.Local.json
+appsettings.*.Local.json
+secrets.json
+
+## Load-test output
+loadgen-*.json
+loadgen-*.log
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store

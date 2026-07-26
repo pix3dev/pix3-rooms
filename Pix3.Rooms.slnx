@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Pix3.Rooms.Protocol/Pix3.Rooms.Protocol.csproj" />
+    <Project Path="src/Pix3.Rooms.Server/Pix3.Rooms.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Pix3.Rooms.Tests/Pix3.Rooms.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Pix3.Rooms.LoadGen/Pix3.Rooms.LoadGen.csproj" />
+  </Folder>
+</Solution>
