@@ -471,6 +471,16 @@ public sealed class RoomClient : IAsyncDisposable
                 Metrics.HostChanges++;
                 break;
 
+            case MessageTypeIds.RoomRosterEvent:
+                RoomRosterEvent roomRoster = MemoryPackSerializer.Deserialize<RoomRosterEvent>(frame[1..])!;
+                Metrics.RosterChunks++;
+                if (FrameFlags.IsFinal(roomRoster.FrameFlags))
+                {
+                    Metrics.RostersCompleted++;
+                }
+
+                break;
+
             case MessageTypeIds.SignalEvent:
                 Metrics.SignalEvents++;
                 break;

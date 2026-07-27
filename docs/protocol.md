@@ -35,7 +35,7 @@ Negotiation is **by range, not equality**:
 
 **Unknown TypeId is ignored and counted, never fatal — in both directions.** That is what lets a game published six months ago keep working when the fabric adds messages. A sustained stream of unknown ids is still abuse and trips the consecutive-protocol-error cutoff.
 
-Successful handshake: `HelloCommand` → validate token → resolve room → join → `WelcomeEvent`, then `RoomVarsChangedEvent`, then one or more `SnapshotPacket`s (the last with `Final` set), then `PeerJoinedEvent` fan-out to the others.
+Successful handshake: `HelloCommand` → validate token → resolve room → join → `WelcomeEvent`, then `RoomVarsChangedEvent`, then one or more `RoomRosterEvent`s (the last with `Final` set), then one or more `SnapshotPacket`s (the last with `Final` set), then `PeerJoinedEvent` fan-out to the others.
 
 ## TypeId allocation
 
@@ -68,6 +68,19 @@ Ranges are reserved; do not allocate outside them. A `MessageTypeIds` constant i
 | 14 | `ResyncCommand` | C→S | *(empty)* — "my known set is untrustworthy, re-send it" |
 | 15 | `SetClientPrefsCommand` | C→S | `bool Hidden`, `byte SendRateDivisor` |
 | 16 | `HostChangedEvent` | S→C | `uint HostClientId`, `uint PreviousHostClientId` |
+| 17 | `RoomRosterEvent` | S→C | `uint[] ClientIds`, `string[] DisplayNames`, `byte FrameFlags` — see [below](#roomrosterevent) |
+
+#### `RoomRosterEvent`
+
+The room's **complete** membership, **including the receiving client itself**, sent on **every join and every resume**. `ClientIds` and `DisplayNames` are parallel arrays of equal length; `FrameFlags` is the same byte a `SnapshotPacket` carries (bit 0 = `Final`, bits 1–7 reserved and sent 0).
+
+It is a **full-state** message, not a delta: a receiver **replaces** its roster with it, exactly as it replaces its known set with a snapshot. `PeerJoinedEvent` and `PeerLeftEvent` carry the changes afterwards. Like them, it is **room-scoped, never AOI-scoped** — membership is not a spatial fact.
+
+**Chunked.** A full roster does not always fit one frame: 600 members with 32-character display names burst the 4 KiB `MaxPayloadBytes` cap several times over. It is therefore split across several **self-contained** `RoomRosterEvent`s and **only the last carries `Final`** — the same discipline a multi-frame snapshot uses, and the reason a receiver must accumulate rather than apply chunk by chunk. Every chunk encodes to ≤ `MaxPayloadBytes`, which the sender computes rather than approximating with an entry count: a display name is up to 32 *characters* and therefore up to 128 UTF-8 *bytes*.
+
+**A roster is always sent, even when it would be empty**, with `Final` set — the same always-send rule snapshots have, for the same reason: a client must never wait for a completion it is never told about.
+
+Neither of the two obvious alternatives works. **Replaying `PeerJoinedEvent`** at the joiner would push one control frame per existing member into a lane that is 64 deep and **closes the connection when full**, so it would kill a fresh session in a large room; it would also produce false "X joined" events and could never heal a *leave* missed during a resume grace. **Appending the roster to `WelcomeEvent`** would put it in a single unsplittable frame under the payload cap, which a roster bursts at a few dozen players.
 
 #### `WelcomeEvent`
 
@@ -422,7 +435,7 @@ Within a **30-second grace** after a socket drops:
 
 - the client keeps its `ClientId` and its entities, which **freeze in place**;
 - `PeerLeftEvent` is deferred — peers are not told about a blip;
-- a successful resume answers with `WelcomeEvent{Resumed = true}`, the **full** `RoomVarsChangedEvent` set (vars may have changed during the blip, and a resumed client must not reset its local state to find out) and a fresh snapshot — the known set is rebuilt from scratch, never assumed. Peers see no `PeerJoinedEvent`: from their side the member never left;
+- a successful resume answers with `WelcomeEvent{Resumed = true}`, the **full** `RoomVarsChangedEvent` set, the **full** `RoomRosterEvent` (both for the same reason: vars and membership may have changed during the blip, and a resumed client must not reset its local state to find out — a peer that left inside the grace is a `PeerLeftEvent` this client was not connected to receive) and a fresh snapshot — the known set is rebuilt from scratch, never assumed. Peers see no `PeerJoinedEvent`: from their side the member never left;
 - the host role **stays with an absent host** for the duration of its grace. Migrating for a blip would announce exactly what the grace exists to hide;
 - a **failed** resume silently degrades to a fresh join. No new error paths: a stale, wrong or expired key is simply not a resume.
 
@@ -545,7 +558,7 @@ The cost moves from bandwidth to per-message overhead, which is exactly what `Si
 5. `NetId` is opaque to clients; a `(slot, generation)` pair is never reused within a room's lifetime.
 6. **Removals precede reuse**: within a frame, removals are applied before enters and updates.
 7. Servers never trust client-supplied ticks, ids, masks or floats without validation.
-8. Hot frames are ≤ `MaxBytesPerClientPerTick` (1100 B) and self-contained; control frames are ≤ `MaxPayloadBytes` (4 KiB). The server splits its own oversized snapshots rather than exceeding either.
+8. Hot frames are ≤ `MaxBytesPerClientPerTick` (1100 B) and self-contained; control frames are ≤ `MaxPayloadBytes` (4 KiB). The server splits its own oversized messages — snapshots and rosters — rather than exceeding either.
 9. **Unknown TypeIds are ignored and counted**, never fatal, in both directions.
 10. Every close whose reason is known is preceded by a `RejectedEvent`, so the client can show a real message.
 11. The quantized integers are the replicated values, on both sides, including for dirty detection.
@@ -562,6 +575,12 @@ Two mechanisms are specified now and implemented then, behind stubbed seams:
 Explicitly **not** coming: ack bitfields and delta-from-acknowledged baselines (TCP already orders and retransmits; resync covers our own queue, and 32 known-set snapshots per client would cost ~10 MB per room), bit-packing, varints, smallest-three quaternions, any stream compression (breaks memcpy fan-out), per-kind hot schemas, and `permessage-deflate` — which is actively refused, since context takeover breaks datagram portability.
 
 ## Change log
+
+### Additive since v2 — no version bump
+
+These entries add TypeIds without touching a single existing byte layout, so `ProtocolVersion.Current` stays at 2. **A new TypeId is not a wire break**: unknown TypeIds are ignored and counted, never fatal, in *both* directions, so an older client keeps working against a newer fabric and a newer client keeps working against an older one. Only a change to an existing layout is a version bump.
+
+- **`RoomRosterEvent` (17, S→C)** — the complete membership, including the receiving client, sent on every join and every resume. A joiner is excluded from its own `PeerJoinedEvent` fan-out and so was never told who was already in the room; a resumed client could likewise have missed a join or a leave during its grace. Room-scoped like the peer events, full-state rather than delta, and chunked with `Final` like a snapshot. A client that predates it simply never learns the roster, exactly as before.
 
 ### v2 (2026-07-27) — the first version that ships
 

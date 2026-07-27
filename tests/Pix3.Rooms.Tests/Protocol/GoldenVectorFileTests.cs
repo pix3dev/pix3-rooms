@@ -883,6 +883,11 @@ public class GoldenVectorFileTests
             return value.EnumerateArray().Select(v => v.GetString()!).ToArray();
         }
 
+        if (target == typeof(uint[]))
+        {
+            return value.EnumerateArray().Select(v => v.GetUInt32()).ToArray();
+        }
+
         throw new InvalidOperationException($"No JSON conversion for property type {target.Name}.");
     }
 }
