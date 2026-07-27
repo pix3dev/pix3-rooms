@@ -104,7 +104,11 @@ jobs:
           ARCHIVE="/tmp/pix3-rooms-${RELEASE_SHA}.tar.gz"
 
           if [ ! -f "${DEPLOY_ROOT}/shared/rooms.env" ]; then
-            echo "Missing ${DEPLOY_ROOT}/shared/rooms.env on the host" >&2
+            # DEPLOY_ROOT is the ROOMS_DEPLOY_PATH secret, so GitHub masks it out of this
+            # message: say where to look rather than printing a path that renders as ***.
+            echo "No shared/rooms.env under the deploy root." >&2
+            echo "Either the file is missing on the host, or the ROOMS_DEPLOY_PATH secret is wrong." >&2
+            echo "Deploy root resolves to a directory that is $([ -d "${DEPLOY_ROOT}" ] && echo present || echo ABSENT)." >&2
             exit 1
           fi
 
