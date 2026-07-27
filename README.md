@@ -46,8 +46,6 @@ curl -X POST http://localhost:5011/admin/rooms \
 
 ### Load test
 
-Planned interface of `tools/Pix3.Rooms.LoadGen` (still a stub — see [Status](#status)):
-
 ```bash
 dotnet run --project tools/Pix3.Rooms.LoadGen -- \
   --admin http://localhost:5011 --service-token dev-service-token \
@@ -142,11 +140,11 @@ The artifact is ~35 MB gzipped because it carries the runtime. Dropping `--self-
 
 ## Status
 
-**Phase 0, mid-flight.** The server runs: composition root wired (options binding with startup validation, DI, `/ws` + admin REST + `/health` + `/metrics`, graceful shutdown), room lifecycle with per-room tick loops and TTL eviction, versioned handshake with JWT room tokens, quotas and rate limits, generic entity replication with spatial-hash AOI and encode-once fan-out, room-scoped chat and room variables, hand-rolled Prometheus metrics.
+**Phase 0 complete; Phase 1 starting on the client side.** The server runs: composition root wired (options binding with startup validation, DI, `/ws` + admin REST + `/health` + `/metrics`, graceful shutdown), room lifecycle with per-room tick loops and TTL eviction, versioned handshake with JWT room tokens, quotas and rate limits, generic entity replication with spatial-hash AOI and encode-once fan-out, room-scoped chat and room variables, hand-rolled Prometheus metrics. Protocol v2 is implemented throughout and is what [`docs/protocol.md`](docs/protocol.md) describes. `dotnet test` runs **419** tests, and production is live at `rooms.pix3.dev`.
 
-**In progress: the protocol v2 code pass.** [`docs/protocol.md`](docs/protocol.md) and [`docs/architecture.md`](docs/architecture.md) are already v2 and are the authority; the modules still implement v1 layouts and message names. Order of work: Protocol (quantization, slot-addressed records, renames) → Replication (two-phase known-set commit, `Seq`, caps, hysteresis, focus binding) → Net/Rooms (queue lanes, dedicated tick thread, pre-auth gate, resume grace, host migration) → tests + LoadGen.
+**The wire contract is pinned from both sides.** [`docs/protocol-vectors.json`](docs/protocol-vectors.json) holds byte-exact golden vectors — quantization, every hot-plane packet, every control-message shape — derived by hand from `docs/protocol.md` rather than captured from a codec. `tests/Pix3.Rooms.Tests/Protocol/GoldenVectorFileTests.cs` checks this server against it, and the hand-written TypeScript client in the pix3 repo (`packages/pix3-runtime/src/net/protocol/`) checks itself against a byte-identical copy. A `diff` between the two files is what proves the implementations are in sync.
 
-Not yet: golden-vector and behaviour tests, a real load generator, Level-2 server-side rules (movement validation, match flow, score), Level-3 user server scripts (headless `@pix3/runtime` in sandboxed workers), multi-node fabric, WebTransport. See the plan for sequencing.
+Not yet: the runtime's `NetworkService` and replicated-transform components, the editor's "Play Online" flow, Level-2 server-side rules (movement validation, match flow, score), Level-3 user server scripts (headless `@pix3/runtime` in sandboxed workers), multi-node fabric, WebTransport. See the plan for sequencing.
 
 ## Lineage
 

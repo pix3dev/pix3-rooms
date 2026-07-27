@@ -123,6 +123,76 @@ Delivery split, by target:
 - `AllPeers` (1) and `SinglePeer` (2) — delivered as `SignalEvent`, one frame per recipient. Low rate by quota (2/s and 20/s), so the control plane is the right home.
 - `AoiPeers` (3) — batched into one `SignalBatchPacket` per recipient per tick, assembled with the same encode-once/memcpy-many discipline as the delta and flushed alongside it. This is the path a shooter's fire events take (see [Projectiles](#projectiles-are-not-entities)); it must never cost an extra socket send.
 
+## Control-plane encoding
+
+The control plane is MemoryPack's **version-tolerant object** format. C# gets it from the source generator; a client does not, because [the TypeScript generator is not usable here](#change-log) — so the layout is normative and spelled out below. Everything is little-endian.
+
+```
+[u8 memberCount][varint ByteLength × memberCount][member values …]
+```
+
+All the lengths come **first, as a block**, and only then the values — not length-then-value interleaved. `memberCount` is `0…249`; `255` means the whole object is null (never sent by this protocol — a message is either present as a frame or not). **`250…254` are reserved by MemoryPack** (250 discriminates a union tag or circular-reference id) and this protocol uses none of them: reject them as malformed rather than guessing. An empty message (`LeaveCommand`, `ResyncCommand`) is the single byte `00`.
+
+`ByteLength` is the size of that member's encoded value, which is what lets a reader **skip a member it does not know**. That is the entire mechanism behind "a field can be appended without a version bump", and it imposes two rules on a conforming client:
+
+- **Reading**: iterate `min(memberCount, membersIKnow)`, and for a `memberCount` larger than yours, advance by the remaining declared lengths rather than failing. A `memberCount` *smaller* than yours is an older peer: leave your surplus members at their defaults.
+- **Writing**: emit every member your version defines, in order, never a prefix — the reader on the other side matches members by position, not by name.
+
+### Varint (member byte-lengths)
+
+| Value | Encoding |
+|---|---|
+| `0…127` | that byte, raw |
+| `128…65535` | `0x84`, then `u16` |
+| larger | `0x82`, then `i32` |
+
+The marker byte is a negative `sbyte` selecting the width that follows, so raw lengths can never collide with it. **Only the first two rows are reachable in this protocol** — `MaxPayloadBytes` caps a control frame at 4 KiB, so no single member's value can reach 65536. A client should accept the third form and reject any other marker outright rather than guess a width: a misread length silently shifts every following member.
+
+### Primitives
+
+| Type | Bytes |
+|---|---|
+| `bool` | 1 (`00` / `01`) |
+| `byte`, `sbyte` | 1 |
+| `ushort`, `short` | 2 |
+| `uint`, `int`, `float` | 4 |
+| `ulong`, `long` | 8 |
+
+Every `long` this protocol defines is a **Unix-millisecond timestamp** (`ClientTimeMs`, `ServerTimeMs`), so a client may narrow it to whatever its language calls a number — JavaScript's double holds milliseconds exactly until the year 287396 — rather than carrying a 64-bit integer type through its API. A conforming reader should still refuse a value it cannot represent exactly instead of silently truncating.
+
+### `string` (UTF-8)
+
+```
+[i32 ~utf8ByteCount][i32 utf16Length][utf8 bytes]
+```
+
+The first word is the **bitwise complement** of the UTF-8 byte count, so it is always negative — that is what distinguishes a UTF-8 string from the UTF-16 form (a non-negative word is a UTF-16 length) without a separate tag byte. `utf16Length` is the .NET `string.Length` the decoded text will have, i.e. its length in UTF-16 code units: equal to the byte count for ASCII, but **not** for anything above U+007F, and a client that writes the UTF-8 byte count in both slots will produce text that a C# reader mis-sizes.
+
+Two special forms: an **empty** string is `00000000` (4 bytes, the non-negative UTF-16 length zero), and a **null** string is `FFFFFFFF`. Both occupy a member `ByteLength` of 4.
+
+**Always write the UTF-8 form; accept the UTF-16 one.** A non-negative first word is a UTF-16 string — `[i32 utf16Length][utf16le bytes]` — which MemoryPack can emit but this protocol never does. A reader should decode it anyway rather than reject it: refusing an encoding the library can legitimately produce is a silent interop trap, and accepting it costs a branch.
+
+### `byte[]` and arrays
+
+```
+[i32 count][elements …]
+```
+
+`count` is the **element** count, not a byte count — identical for `byte[]`, but `string[]` and `byte[][]` (`RoomVarsChangedEvent`) hold `count` fully-encoded elements after the header, each in the format above. A null array is `FFFFFFFF`; an empty one is `00000000`.
+
+### Worked example
+
+`PeerLeftEvent{ClientId = 7, Reason = 3}` — two members, `u32` and `u8`:
+
+```
+02          memberCount
+04 01       ByteLength: 4, 1
+07000000    ClientId
+03          Reason
+```
+
+Byte-exact vectors for every message shape — including the string, null-array and multi-byte-varint cases — live in [`protocol-vectors.json`](./protocol-vectors.json).
+
 ## Hot plane
 
 ### Quantization
@@ -143,6 +213,8 @@ Records stay **byte-aligned** — no bit-packing — because memcpy fan-out is w
 - TypeScript writes `Math.floor(v + 0.5)` too — **not** `Math.round`. They are not the same function: for `v = 0.49999999999999994` (the largest double below ½) `Math.round(v)` is `0` while `Math.floor(v + 0.5)` is `1`, because the addition itself rounds up to `1.0`. The spec means the `floor` form.
 
 **Intermediate arithmetic is `double`**, on both sides, even though the wire values and the game's floats are 32-bit. A JavaScript client has no float32 arithmetic at all, so double intermediates are the only way the two implementations land on the same integer at a rounding boundary; widening a `float` to `double` is exact, so nothing is lost. Golden vectors are derived the same way — never with float32 intermediates.
+
+**The dequantized result is narrowed to float32**, even though the arithmetic reaching it is `double`. C# gets this from the `(float)` return type; a JavaScript client must apply `Math.fround` explicitly. This is not cosmetic: the round-trip fixed point below — requantizing a dequantized value lands on the same integer — is what the "quantized integers are the replicated values" rule rests on, and the bound that guarantees it (`M < 128 × WorldSize`) is derived from float32's 2⁻²⁴ relative error. A client that skips the narrowing holds values the server cannot hold, and the fixed point becomes approximate instead of exact.
 
 **World bounds must satisfy `max(|WorldOriginX|, |WorldOriginY|, |origin + WorldSize|) < 128 × WorldSize`.** Dequantized values are handed to the game as `float32`, whose relative error is 2⁻²⁴; requantizing stays on the same integer only while `M × 2⁻²⁴ × 65535 / WorldSize < ½`, i.e. `M < 128 × WorldSize`. Outside that ratio the round-trip fixed point below silently stops holding. The default world (`−2048, −2048, 4096`) has a 256× margin; a room is refused at creation if its bounds do not.
 
