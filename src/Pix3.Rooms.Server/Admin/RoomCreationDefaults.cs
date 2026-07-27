@@ -1,3 +1,5 @@
+using System.Globalization;
+using Pix3.Rooms.Protocol;
 using Pix3.Rooms.Server.Rooms;
 
 namespace Pix3.Rooms.Server.Admin;
@@ -34,6 +36,24 @@ public sealed record RoomCreationDefaults
 
     /// <summary>Default entity-table capacity.</summary>
     public int MaxEntities { get; init; } = 4096;
+
+    /// <summary>Default k-nearest visibility cap.</summary>
+    public int MaxVisibleEntities { get; init; } = 64;
+
+    /// <summary>Default world-space X of the low corner of a room's quantization range.</summary>
+    public float WorldOriginX { get; init; } = -2048f;
+
+    /// <summary>Default world-space Y of the low corner of a room's quantization range.</summary>
+    public float WorldOriginY { get; init; } = -2048f;
+
+    /// <summary>Default side length of the square world a room quantizes against.</summary>
+    public float WorldSize { get; init; } = 4096f;
+
+    /// <summary>
+    /// Default entity-kind allowlist. Empty means "allow any kind", which the composition root refuses
+    /// to start with in Production — an unknown kind faults every observer's scene code.
+    /// </summary>
+    public IReadOnlyList<ushort> AllowedKinds { get; init; } = [];
 
     /// <summary>Default authority model.</summary>
     public RoomMode Mode { get; init; } = RoomMode.Relay;
@@ -72,6 +92,24 @@ public sealed record RoomCreationDefaults
             ? entities
             : fallback.MaxEntities;
 
+        int maxVisibleEntities =
+            defaults.GetValue<int?>("MaxVisibleEntities") is int visible && RoomLimits.IsValidMaxVisibleEntities(visible)
+                ? visible
+                : fallback.MaxVisibleEntities;
+
+        // The world is resolved as one value, never field by field: a configured origin combined with a
+        // defaulted size is a world nobody asked for, and every quantized value in the room is expressed
+        // against it. An unusable trio falls back to the built-in world whole.
+        float worldOriginX = defaults.GetValue<float?>("WorldOriginX") ?? fallback.WorldOriginX;
+        float worldOriginY = defaults.GetValue<float?>("WorldOriginY") ?? fallback.WorldOriginY;
+        float worldSize = defaults.GetValue<float?>("WorldSize") ?? fallback.WorldSize;
+        if (!WorldQuantizer.IsValidWorld(worldOriginX, worldOriginY, worldSize))
+        {
+            worldOriginX = fallback.WorldOriginX;
+            worldOriginY = fallback.WorldOriginY;
+            worldSize = fallback.WorldSize;
+        }
+
         RoomMode mode = TryParseMode(defaults.GetValue<string?>("Mode"), out RoomMode parsed) ? parsed : fallback.Mode;
 
         int? maxRooms = configuration.GetSection(ServerSection).GetValue<int?>("MaxRooms") is int rooms && rooms > 0
@@ -85,9 +123,55 @@ public sealed record RoomCreationDefaults
             AoiRadius = aoiRadius,
             IdleTtlSeconds = idleTtlSeconds,
             MaxEntities = maxEntities,
+            MaxVisibleEntities = maxVisibleEntities,
+            WorldOriginX = worldOriginX,
+            WorldOriginY = worldOriginY,
+            WorldSize = worldSize,
+            AllowedKinds = ReadAllowedKinds(defaults, fallback.AllowedKinds),
             Mode = mode,
             MaxRooms = maxRooms,
         };
+    }
+
+    /// <summary>
+    /// Reads <c>Rooms:Defaults:AllowedKinds</c> as an array of entity kinds, dropping entries outside the
+    /// <c>u16</c> kind space and collapsing duplicates.
+    /// </summary>
+    /// <remarks>
+    /// A bad entry is dropped rather than fatal, matching the rest of this type: a misconfigured default
+    /// must not turn every create request into a 400. An allowlist that ends up empty is caught by the
+    /// composition root's production refusal instead.
+    /// </remarks>
+    private static IReadOnlyList<ushort> ReadAllowedKinds(IConfigurationSection defaults, IReadOnlyList<ushort> fallback)
+    {
+        IConfigurationSection section = defaults.GetSection("AllowedKinds");
+        if (!section.Exists())
+        {
+            return fallback;
+        }
+
+        List<ushort> kinds = [];
+        HashSet<ushort> seen = [];
+        foreach (IConfigurationSection entry in section.GetChildren())
+        {
+            if (!int.TryParse(entry.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int value))
+            {
+                continue;
+            }
+
+            if (value is < ushort.MinValue or > ushort.MaxValue)
+            {
+                continue;
+            }
+
+            ushort kind = (ushort)value;
+            if (seen.Add(kind))
+            {
+                kinds.Add(kind);
+            }
+        }
+
+        return kinds.Count == 0 ? fallback : kinds;
     }
 
     /// <summary>

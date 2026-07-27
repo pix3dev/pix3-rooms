@@ -48,8 +48,27 @@ public static class RoomLimits
     /// <summary>Smallest accepted entity-table capacity.</summary>
     public const int MinMaxEntities = 1;
 
-    /// <summary>Largest accepted entity-table capacity: one netId slot per entity.</summary>
+    /// <summary>
+    /// Largest accepted entity-table capacity: 65535, one <c>u16</c> netId slot per entity. Server→client
+    /// records address entities by <c>u16 Slot</c> under the v2 16/16 <see cref="NetId"/> split, so slots
+    /// beyond this cannot be expressed on the wire at all.
+    /// </summary>
     public const int MaxMaxEntities = NetId.MaxSlot;
+
+    /// <summary>A client must be allowed to see at least one entity.</summary>
+    public const int MinMaxVisibleEntities = 1;
+
+    /// <summary>
+    /// Largest accepted k-nearest visibility cap. <c>WelcomeEvent.MaxVisibleEntities</c> is a <c>u16</c>
+    /// and a known set is bounded by the slot space anyway, so the two ceilings coincide.
+    /// </summary>
+    public const int MaxMaxVisibleEntities = NetId.MaxSlot;
+
+    /// <summary>
+    /// Longest accepted entity-kind allowlist. Mirrors <c>RoomConfigValidator.MaxAllowedKinds</c>: a
+    /// prefab table larger than this is not an allowlist any more.
+    /// </summary>
+    public const int MaxAllowedKinds = 1024;
 
     /// <summary>True when the value is inside the accepted member-cap range.</summary>
     public static bool IsValidMaxPlayers(int value) => value is >= MinMaxPlayers and <= MaxMaxPlayers;
@@ -67,6 +86,25 @@ public static class RoomLimits
 
     /// <summary>True when the value is inside the accepted entity-capacity range.</summary>
     public static bool IsValidMaxEntities(int value) => value is >= MinMaxEntities and <= MaxMaxEntities;
+
+    /// <summary>True when the value is inside the accepted visibility-cap range.</summary>
+    public static bool IsValidMaxVisibleEntities(int value)
+        => value is >= MinMaxVisibleEntities and <= MaxMaxVisibleEntities;
+
+    /// <summary>True when the value is a valid entity kind, i.e. inside the wire's <c>u16</c> kind space.</summary>
+    public static bool IsValidKind(int value) => value is >= ushort.MinValue and <= ushort.MaxValue;
+
+    /// <summary>
+    /// True when the trio is a world every quantized value in a room can be expressed against.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="WorldQuantizer.IsValidWorld"/> is the authority, float32 precision ratio included:
+    /// outside it the encode→decode→encode fixed point silently stops holding, so the failure mode is not
+    /// a bad number but an entire room whose entities oscillate by a quantum and never settle. Clamping a
+    /// world is never right — it would silently move every entity in the game — so this is a rejection.
+    /// </remarks>
+    public static bool IsValidWorld(float originX, float originY, float size)
+        => WorldQuantizer.IsValidWorld(originX, originY, size);
 
     /// <summary>
     /// True when the id is a non-empty, bounded token of <c>[A-Za-z0-9._-]</c>. Used for project and

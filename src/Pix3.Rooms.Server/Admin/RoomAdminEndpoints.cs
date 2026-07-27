@@ -1,4 +1,5 @@
 using Pix3.Rooms.Protocol;
+using Pix3.Rooms.Server.Replication;
 using Pix3.Rooms.Server.Rooms;
 
 namespace Pix3.Rooms.Server.Admin;
@@ -15,6 +16,8 @@ namespace Pix3.Rooms.Server.Admin;
 /// <item><description><c>GET /admin/rooms</c> — every room with its live counters.</description></item>
 /// <item><description><c>GET /admin/rooms/{roomId}</c> — one room; 404 when unknown.</description></item>
 /// <item><description><c>DELETE /admin/rooms/{roomId}</c> — destroy; 204, or 404 when unknown.</description></item>
+/// <item><description><c>GET /admin/rooms/{roomId}/violations/{clientId}</c> — one client's violation
+/// tallies; 404 only when the room is unknown.</description></item>
 /// </list>
 /// Every route sits behind <see cref="ServiceTokenEndpointFilter"/>. <c>GET /health</c> is mapped
 /// separately by <see cref="HealthEndpoints"/> because liveness must stay unauthenticated.
@@ -26,6 +29,9 @@ public static class RoomAdminEndpoints
 
     /// <summary>Route of the room collection, relative to <see cref="GroupPrefix"/>.</summary>
     public const string RoomsRoute = "/rooms";
+
+    /// <summary>Route segment of a room's per-client violation tallies, relative to one room.</summary>
+    public const string ViolationsRoute = "/violations";
 
     private const string LogCategory = "Pix3.Rooms.Server.Admin.RoomAdminApi";
     private const string DefaultDestroyReason = "destroyed via admin API";
@@ -46,6 +52,8 @@ public static class RoomAdminEndpoints
         group.MapGet(RoomsRoute, ListRooms).WithName("ListRooms");
         group.MapGet($"{RoomsRoute}/{{roomId}}", GetRoom).WithName("GetRoom");
         group.MapDelete($"{RoomsRoute}/{{roomId}}", DeleteRoom).WithName("DeleteRoom");
+        group.MapGet($"{RoomsRoute}/{{roomId}}{ViolationsRoute}/{{clientId}}", GetRoomViolations)
+            .WithName("GetRoomViolations");
 
         return group;
     }
@@ -166,9 +174,42 @@ public static class RoomAdminEndpoints
         return TypedResults.NoContent();
     }
 
+    /// <summary>
+    /// Per-client violation tallies. <c>docs/protocol.md</c> says these counters exist to be read; this is
+    /// the read side. A client the room does not know reports zeros rather than 404 — an operator asking
+    /// "what has this client done" is answered by "nothing", and distinguishing "left" from "clean" would
+    /// leak room membership to a caller that already knows the id it asked about.
+    /// </summary>
+    private static IResult GetRoomViolations(string roomId, uint clientId, IRoomManager manager)
+    {
+        if (!RoomIdPolicy.IsValid(roomId))
+        {
+            return InvalidRoomId();
+        }
+
+        if (!manager.TryGet(roomId, out IRoom? room))
+        {
+            return NotFound(roomId);
+        }
+
+        ViolationCounters counters = room.SnapshotViolations(clientId);
+
+        return TypedResults.Ok(new RoomViolationsResponse(
+            room.Config.RoomId,
+            clientId,
+            counters.Ownership,
+            counters.Speed,
+            counters.Mask,
+            counters.Nan,
+            counters.Kind,
+            counters.Quota,
+            counters.FocusClamp,
+            counters.Teleport));
+    }
+
     private static IResult DescribeExisting(IRoom existing, RoomConfig requested)
     {
-        if (existing.Config == requested)
+        if (SameConfiguration(existing.Config, requested))
         {
             return TypedResults.Ok(Describe(existing));
         }
@@ -176,6 +217,45 @@ public static class RoomAdminEndpoints
         return TypedResults.Conflict(new AdminErrorResponse(
             "room_exists",
             $"Room '{requested.RoomId}' already exists with a different configuration."));
+    }
+
+    /// <summary>
+    /// Structural comparison of two room configurations, for the idempotent-retry answer.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="RoomConfig"/> is a record, but <see cref="RoomConfig.AllowedKinds"/> is a list, and
+    /// record equality compares it by reference — two identical create requests build two different
+    /// arrays, so plain <c>==</c> would turn every retry that names an allowlist into a 409. Substituting
+    /// the requested list into a copy makes the record comparison cover the scalars, and the allowlist is
+    /// then compared element-wise.
+    /// </remarks>
+    private static bool SameConfiguration(RoomConfig existing, RoomConfig requested)
+        => (existing with { AllowedKinds = requested.AllowedKinds }) == requested
+           && SameKinds(existing.AllowedKinds, requested.AllowedKinds);
+
+    private static bool SameKinds(IReadOnlyList<ushort> left, IReadOnlyList<ushort> right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        // Order matters here even though the field denotes a set: RoomConfigValidator preserves the
+        // caller's order while de-duplicating, so an identical request always yields an identical order.
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (left[i] != right[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static RoomResponse Describe(IRoom room)
@@ -193,6 +273,11 @@ public static class RoomAdminEndpoints
             config.IdleTtlSeconds,
             config.MaxEntities,
             config.Mode.ToString(),
+            config.MaxVisibleEntities,
+            config.WorldOriginX,
+            config.WorldOriginY,
+            config.WorldSize,
+            config.AllowedKinds,
             room.PlayerCount,
             room.CreatedAt,
             room.LastActivityAt,
@@ -204,9 +289,12 @@ public static class RoomAdminEndpoints
             stats.ServerTick,
             stats.TickMsP50,
             stats.TickMsP99,
+            stats.TickJitterMsP99,
             stats.BytesOutPerSecond,
             stats.DroppedFrames,
-            stats.BudgetOverruns);
+            stats.BudgetOverruns,
+            stats.Resyncs,
+            stats.Violations);
 
         return new RoomResponse(descriptor, statsResponse);
     }

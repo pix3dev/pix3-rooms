@@ -55,12 +55,21 @@ public sealed class InsecureRoomTokenValidator : IRoomTokenValidator
         new("", "", "", true, null, DateTimeOffset.MinValue);
 
     private readonly ILogger<InsecureRoomTokenValidator> _logger;
+    private readonly IAuthFailureSink _failures;
 
     /// <summary>Creates the validator and logs the insecure-mode banner.</summary>
-    public InsecureRoomTokenValidator(ILogger<InsecureRoomTokenValidator> logger)
+    /// <param name="logger">Logger for the startup banner.</param>
+    /// <param name="failures">
+    /// Where the fine-grained refusal reason is counted. Optional so an existing composition root keeps
+    /// compiling; pass the transport's counter surface so <c>auth_failures_total{reason}</c> is populated.
+    /// </param>
+    public InsecureRoomTokenValidator(
+        ILogger<InsecureRoomTokenValidator> logger,
+        IAuthFailureSink? failures = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
         _logger = logger;
+        _failures = failures ?? NullAuthFailureSink.Instance;
         _logger.LogWarning(StartupWarning);
     }
 
@@ -82,13 +91,21 @@ public sealed class InsecureRoomTokenValidator : IRoomTokenValidator
         claims = RejectedClaims;
         reject = RejectCode.InvalidToken;
 
-        if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(requestedRoomId))
+        if (string.IsNullOrEmpty(token))
         {
+            _failures.OnAuthFailure(AuthFailureCause.MissingToken);
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(requestedRoomId))
+        {
+            _failures.OnAuthFailure(AuthFailureCause.Other);
             return false;
         }
 
         if (token.Length > MaxTokenLength || !token.StartsWith(TokenPrefix, StringComparison.Ordinal))
         {
+            _failures.OnAuthFailure(AuthFailureCause.MalformedToken);
             return false;
         }
 
@@ -102,18 +119,21 @@ public sealed class InsecureRoomTokenValidator : IRoomTokenValidator
 
         if (subject.IsEmpty)
         {
+            _failures.OnAuthFailure(AuthFailureCause.MalformedToken);
             return false;
         }
 
         // Exactly two or three segments; anything else is a typo, not an identity.
         if (roomId.IndexOf(':') >= 0)
         {
+            _failures.OnAuthFailure(AuthFailureCause.MalformedToken);
             return false;
         }
 
         if (!roomId.IsEmpty && !roomId.SequenceEqual(requestedRoomId.AsSpan()))
         {
             reject = RejectCode.TokenRoomMismatch;
+            _failures.OnAuthFailure(AuthFailureCause.RoomMismatch);
             return false;
         }
 

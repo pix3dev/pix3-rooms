@@ -1,5 +1,6 @@
 using System.Text;
 using Pix3.Rooms.Protocol;
+using Pix3.Rooms.Server.Auth;
 using Pix3.Rooms.Server.Net;
 using Pix3.Rooms.Server.Observability;
 using Pix3.Rooms.Server.Rooms;
@@ -24,15 +25,60 @@ namespace Pix3.Rooms.Server;
 /// <para>
 /// Two overlapping views are exported on purpose. The <see cref="RoomsMetrics"/> families
 /// (<c>connections_total</c>, <c>frames_dropped_total{reason}</c>, <c>quota_violations_total{kind}</c>, …)
-/// are the <b>stable dashboard contract</b> — alert on those. The <c>net_*_total</c> series are raw
-/// per-<see cref="NetCounter"/> transport detail, so the full picture is scrapeable without having to
-/// guess which raw counter feeds which mapped family.
+/// are the <b>stable dashboard contract</b> — alert on those. The <c>net_*_total</c> and
+/// <c>room_*_total</c> series are raw per-<see cref="NetCounter"/> transport detail and raw room detail,
+/// so the full picture is scrapeable without having to guess which raw counter feeds which mapped family.
 /// </para>
 /// </remarks>
 public sealed class MetricsBridge : BackgroundService
 {
+    /// <summary>
+    /// The per-room counters this bridge diffs, in the order their baselines are stored. Index 0 feeds the
+    /// pre-existing <c>room_budget_overruns_total</c> family; the rest get a raw series of their own.
+    /// </summary>
+    /// <remarks>
+    /// The first three come from <see cref="RoomStats"/> (any <see cref="IRoom"/> has them); the rest are
+    /// published by the concrete <see cref="Room"/> and are sampled as 0 for any other implementation.
+    /// </remarks>
+    private enum RoomCounter
+    {
+        BudgetOverruns = 0,
+        Resyncs,
+        Violations,
+        SkippedTicks,
+        ResumesGranted,
+        ResumeGracesStarted,
+        ResumeGracesExpired,
+        HostMigrations,
+        SignalRejections,
+        RefusedEntityUpdates,
+    }
+
     /// <summary>How often one pass runs.</summary>
     private static readonly TimeSpan PumpInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>Number of <see cref="RoomCounter"/> members.</summary>
+    private const int RoomCounterCount = (int)RoomCounter.RefusedEntityUpdates + 1;
+
+    /// <summary>
+    /// <see cref="AuthFailureCause"/> (what the Auth module reports) to <see cref="AuthFailureReason"/>
+    /// (what the metric is labelled with), indexed by cause ordinal.
+    /// </summary>
+    /// <remarks>
+    /// The two enums are deliberate duplicates — <c>Auth</c> may not reference <c>Observability</c> — and
+    /// they differ by exactly one member: <see cref="AuthFailureReason.ServiceTokenInvalid"/> has no cause,
+    /// because <c>ServiceTokenEndpointFilter</c> counts its own refusals directly. Mapping only the causes
+    /// is therefore also what keeps that label from being counted twice.
+    /// </remarks>
+    private static readonly AuthFailureReason[] AuthReasonByCause =
+    [
+        AuthFailureReason.MissingToken,
+        AuthFailureReason.MalformedToken,
+        AuthFailureReason.InvalidSignature,
+        AuthFailureReason.Expired,
+        AuthFailureReason.RoomMismatch,
+        AuthFailureReason.Other,
+    ];
 
     private readonly NetMetrics _net;
     private readonly RoomsMetrics _metrics;
@@ -52,14 +98,27 @@ public sealed class MetricsBridge : BackgroundService
 
     private readonly long[] _lastRejects;
 
-    /// <summary>Last-seen <see cref="RoomStats.BudgetOverruns"/> per room id.</summary>
-    private readonly Dictionary<string, long> _lastBudgetOverruns = new(StringComparer.Ordinal);
+    /// <summary>Last-seen inbound frame count per TypeId; feeds <c>messages_in_total{type}</c>.</summary>
+    private readonly long[] _lastInboundByType = new long[NetMetrics.TypeIdSlotCount];
+
+    /// <summary>Last-seen refusal count per <see cref="AuthFailureCause"/>.</summary>
+    private readonly long[] _lastAuthFailures = new long[NetMetrics.AuthFailureSlotCount];
+
+    /// <summary>Raw per-room series, indexed by <see cref="RoomCounter"/> ordinal.</summary>
+    private readonly Counter[] _roomSeries;
+
+    /// <summary>Last-seen per-room counter values, indexed by room id then <see cref="RoomCounter"/>.</summary>
+    private readonly Dictionary<string, long[]> _lastRoomCounters = new(StringComparer.Ordinal);
+
+    /// <summary>This room's freshly sampled counters. Reused across rooms and passes.</summary>
+    private readonly long[] _roomSample = new long[RoomCounterCount];
 
     private readonly HashSet<string> _liveRoomIds = new(StringComparer.Ordinal);
     private readonly List<string> _staleRoomIds = [];
 
     private readonly Gauge _tickP50SecondsMax;
     private readonly Gauge _tickP99SecondsMax;
+    private readonly Gauge _tickJitterP99SecondsMax;
     private readonly Gauge _bytesOutPerSecond;
 
     /// <summary>Creates the bridge and declares the raw transport and tick-health series.</summary>
@@ -117,9 +176,33 @@ public sealed class MetricsBridge : BackgroundService
             "rooms_tick_p99_seconds_max",
             "Worst per-room 99th-percentile tick duration in seconds (max over all live rooms).");
 
+        // Tick *start* jitter, which body time cannot show: a room can execute every tick in 300 us and
+        // still start 15 ms late on a coarse-granularity platform, and it is the start times players feel.
+        _tickJitterP99SecondsMax = registry.CreateGauge(
+            "rooms_tick_jitter_p99_seconds_max",
+            "Worst per-room 99th-percentile tick start jitter in seconds (max over all live rooms).");
+
         _bytesOutPerSecond = registry.CreateGauge(
             "rooms_bytes_out_per_second",
             "Outbound bytes per second summed over all live rooms.");
+
+        _roomSeries = new Counter[RoomCounterCount];
+
+        // Index 0 reuses the pre-existing dashboard family instead of declaring a second series with the
+        // same name; every other room counter gets a raw series named like the transport's.
+        _roomSeries[(int)RoomCounter.BudgetOverruns] = metrics.RoomBudgetOverrunsTotal;
+        for (int i = 0; i < _roomSeries.Length; i++)
+        {
+            if (_roomSeries[i] is not null)
+            {
+                continue;
+            }
+
+            string member = ((RoomCounter)i).ToString();
+            _roomSeries[i] = registry.CreateCounter(
+                $"room_{ToSnakeCase(member)}_total",
+                $"Room counter {member}, summed over every room that has ever run on this server.");
+        }
     }
 
     /// <summary>
@@ -130,7 +213,9 @@ public sealed class MetricsBridge : BackgroundService
     public void Pump()
     {
         PumpTransport();
+        PumpInboundTypes();
         PumpRejects();
+        PumpAuthFailures();
         PumpRooms();
     }
 
@@ -216,13 +301,30 @@ public sealed class MetricsBridge : BackgroundService
         metrics.QuotaViolations(QuotaKind.SpawnRate).Add(deltas[(int)NetCounter.QuotaSpawnBreaches]);
         metrics.QuotaViolations(QuotaKind.ChatRate).Add(deltas[(int)NetCounter.QuotaChatBreaches]);
 
-        // Not fed from here, each waiting on its own module's metrics seam:
-        // messages_in_total{type} — per-TypeId counting has to happen inside InboundDispatcher, which is
-        //   the only place that knows a frame's TypeId; NetMetrics only totals InboundMessages.
-        // auth_failures_total{reason} other than service_token_invalid — needs a seam in the Auth module;
-        //   ServiceTokenEndpointFilter already counts its own refusals directly.
-        // room_tick_duration_seconds — the histogram needs per-tick observations from inside Room; only
-        //   the percentiles RoomStats already computes are exported (see the rooms_tick_* gauges).
+        // Still not fed from here: room_tick_duration_seconds. The histogram needs per-tick observations
+        // from inside Room, and only the percentiles RoomStats already computes cross the seam — so tick
+        // health is exported as the rooms_tick_* gauges instead.
+    }
+
+    /// <summary>
+    /// Diffs the 256-slot per-TypeId inbound histogram into <c>messages_in_total{type}</c>. Labels come
+    /// from <see cref="MessageTypeIds.GetName"/> (resolved once by <see cref="RoomsMetrics"/>), so they are
+    /// the v2 class names and unmapped ids collapse into the shared <c>other</c> series.
+    /// </summary>
+    private void PumpInboundTypes()
+    {
+        for (int typeId = 0; typeId < _lastInboundByType.Length; typeId++)
+        {
+            long current = _net.GetInboundByType((byte)typeId);
+            long delta = current - _lastInboundByType[typeId];
+            if (delta <= 0)
+            {
+                continue;
+            }
+
+            _lastInboundByType[typeId] = current;
+            _metrics.MessagesIn((byte)typeId).Add(delta);
+        }
     }
 
     private void PumpRejects()
@@ -242,6 +344,28 @@ public sealed class MetricsBridge : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Diffs the validators' per-cause refusal counts into <c>auth_failures_total{reason}</c>. Three very
+    /// different stories — no token, unparseable, wrong signature — all reach the client as
+    /// <c>InvalidToken</c>, and this is the only place they stay distinguishable.
+    /// </summary>
+    private void PumpAuthFailures()
+    {
+        for (int i = 0; i < AuthReasonByCause.Length; i++)
+        {
+            AuthFailureCause cause = (AuthFailureCause)i;
+            long current = _net.GetAuthFailureCount(cause);
+            long delta = current - _lastAuthFailures[i];
+            if (delta <= 0)
+            {
+                continue;
+            }
+
+            _lastAuthFailures[i] = current;
+            _metrics.AuthFailures(AuthReasonByCause[i]).Add(delta);
+        }
+    }
+
     private void PumpRooms()
     {
         _metrics.RefreshRoomGauges(_rooms);
@@ -253,6 +377,7 @@ public sealed class MetricsBridge : BackgroundService
         _liveRoomIds.Clear();
         double worstP50Ms = 0d;
         double worstP99Ms = 0d;
+        double worstJitterMs = 0d;
         long bytesOutPerSecond = 0;
 
         for (int i = 0; i < configs.Count; i++)
@@ -267,16 +392,8 @@ public sealed class MetricsBridge : BackgroundService
             _liveRoomIds.Add(roomId);
             RoomStats stats = room.SnapshotStats();
 
-            _lastBudgetOverruns.TryGetValue(roomId, out long previousOverruns);
-            long overrunDelta = stats.BudgetOverruns - previousOverruns;
-            if (overrunDelta > 0)
-            {
-                _metrics.RoomBudgetOverrunsTotal.Add(overrunDelta);
-            }
-
-            // Assigned unconditionally: a room id reused after destruction restarts at zero, and the
-            // baseline has to follow it down or every later overrun would be swallowed.
-            _lastBudgetOverruns[roomId] = stats.BudgetOverruns;
+            SampleRoomCounters(room, stats);
+            AccumulateRoomCounters(roomId);
 
             if (stats.TickMsP50 > worstP50Ms)
             {
@@ -288,6 +405,11 @@ public sealed class MetricsBridge : BackgroundService
                 worstP99Ms = stats.TickMsP99;
             }
 
+            if (stats.TickJitterMsP99 > worstJitterMs)
+            {
+                worstJitterMs = stats.TickJitterMsP99;
+            }
+
             bytesOutPerSecond += stats.BytesOutPerSecond;
         }
 
@@ -296,7 +418,68 @@ public sealed class MetricsBridge : BackgroundService
         // RoomStats reports milliseconds; Prometheus convention (and the unfed histogram) is seconds.
         _tickP50SecondsMax.Set(worstP50Ms / 1000d);
         _tickP99SecondsMax.Set(worstP99Ms / 1000d);
+        _tickJitterP99SecondsMax.Set(worstJitterMs / 1000d);
         _bytesOutPerSecond.Set(bytesOutPerSecond);
+    }
+
+    /// <summary>
+    /// Fills <see cref="_roomSample"/> from one room. The first three values cross the <see cref="IRoom"/>
+    /// seam through <see cref="RoomStats"/>; the rest are published by the concrete <see cref="Room"/> and
+    /// stay zero for any other implementation, which is exactly right — a fake room has no host migrations.
+    /// </summary>
+    private void SampleRoomCounters(IRoom room, RoomStats stats)
+    {
+        long[] sample = _roomSample;
+        sample[(int)RoomCounter.BudgetOverruns] = stats.BudgetOverruns;
+        sample[(int)RoomCounter.Resyncs] = stats.Resyncs;
+        sample[(int)RoomCounter.Violations] = stats.Violations;
+
+        if (room is Room concrete)
+        {
+            sample[(int)RoomCounter.SkippedTicks] = concrete.SkippedTicks;
+            sample[(int)RoomCounter.ResumesGranted] = concrete.ResumesGranted;
+            sample[(int)RoomCounter.ResumeGracesStarted] = concrete.ResumeGracesStarted;
+            sample[(int)RoomCounter.ResumeGracesExpired] = concrete.ResumeGracesExpired;
+            sample[(int)RoomCounter.HostMigrations] = concrete.HostMigrations;
+            sample[(int)RoomCounter.SignalRejections] = concrete.SignalRejections;
+            sample[(int)RoomCounter.RefusedEntityUpdates] = concrete.RefusedEntityUpdates;
+            return;
+        }
+
+        for (int i = (int)RoomCounter.SkippedTicks; i < sample.Length; i++)
+        {
+            sample[i] = 0;
+        }
+    }
+
+    /// <summary>
+    /// Adds this room's positive deltas to the process-wide series and re-bases its baseline.
+    /// </summary>
+    /// <remarks>
+    /// Baselines are stored per room id and rewritten unconditionally: a room id reused after destruction
+    /// restarts at zero, and the baseline has to follow it down or every later increment would be
+    /// swallowed. <c>Violations</c> is not even monotonic within one room — it drops when a member
+    /// leaves — which is the same case and is handled by the same rule.
+    /// </remarks>
+    private void AccumulateRoomCounters(string roomId)
+    {
+        if (!_lastRoomCounters.TryGetValue(roomId, out long[]? baseline))
+        {
+            baseline = new long[RoomCounterCount];
+            _lastRoomCounters[roomId] = baseline;
+        }
+
+        long[] sample = _roomSample;
+        for (int i = 0; i < sample.Length; i++)
+        {
+            long delta = sample[i] - baseline[i];
+            if (delta > 0)
+            {
+                _roomSeries[i].Add(delta);
+            }
+
+            baseline[i] = sample[i];
+        }
     }
 
     /// <summary>
@@ -305,13 +488,13 @@ public sealed class MetricsBridge : BackgroundService
     /// </summary>
     private void PruneDeadRooms()
     {
-        if (_lastBudgetOverruns.Count == _liveRoomIds.Count)
+        if (_lastRoomCounters.Count == _liveRoomIds.Count)
         {
             return;
         }
 
         _staleRoomIds.Clear();
-        foreach (string roomId in _lastBudgetOverruns.Keys)
+        foreach (string roomId in _lastRoomCounters.Keys)
         {
             if (!_liveRoomIds.Contains(roomId))
             {
@@ -321,7 +504,7 @@ public sealed class MetricsBridge : BackgroundService
 
         for (int i = 0; i < _staleRoomIds.Count; i++)
         {
-            _lastBudgetOverruns.Remove(_staleRoomIds[i]);
+            _lastRoomCounters.Remove(_staleRoomIds[i]);
         }
     }
 

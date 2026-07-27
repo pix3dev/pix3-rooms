@@ -8,9 +8,18 @@ namespace Pix3.Rooms.Server.Rooms;
 /// Builds the replication instance for one room.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Replication is <b>per room</b>, never a DI singleton: it owns that room's entity table, spatial hash
-/// and per-subscriber known-sets, and it is single-threaded by contract. Sharing one instance across
-/// rooms is precisely the mistake (one global game model) this fabric was built to avoid.
+/// and per-subscriber known-sets, and it is single-threaded by contract. Sharing one instance across rooms
+/// is precisely the mistake (one global game model) this fabric was built to avoid.
+/// </para>
+/// <para>
+/// The delegate returns <see cref="IRoomReplication"/>: the three members a room drives beyond frame
+/// assembly — <c>IsSnapshotPending</c> (the snapshot continuation cursor is replication-owned state, so
+/// this is the only way to drive the snapshot loop), <c>TryMarkColdDirty</c> and
+/// <c>CountKindViolation</c> — are part of the declared seam, so the room never needs the concrete type
+/// and stays testable against a fake.
+/// </para>
 /// </remarks>
 /// <param name="config">The normalized config of the room being created.</param>
 public delegate IRoomReplication RoomReplicationFactory(RoomConfig config);
@@ -27,7 +36,7 @@ public interface IRoomFactory
 
 /// <summary>
 /// Default <see cref="IRoomFactory"/>: pairs each new room with a freshly constructed
-/// <see cref="IRoomReplication"/> from the injected <see cref="RoomReplicationFactory"/>.
+/// <see cref="RoomReplication"/> from the injected <see cref="RoomReplicationFactory"/>.
 /// </summary>
 public sealed class RoomFactory : IRoomFactory
 {

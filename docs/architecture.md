@@ -67,7 +67,11 @@ public enum FrameLane : byte
 /// A live socket. Room logic only ever sees this interface.
 public interface IClientConnection
 {
-    uint   ClientId    { get; }          // room-unique, monotonic per server; adopted from a resumed session
+    /// Room-unique, monotonic per server. Allocated by Net only AFTER the handshake authenticates — an
+    /// unauthenticated socket consumes no id and no room state — and replaced by the resumed session's
+    /// original id when a resume succeeds (Net owns the allocator; the room hands the old id back in a
+    /// JoinGrant, and the transport adopts it before the member is published).
+    uint   ClientId    { get; }
     string RemoteIp    { get; }
     string DisplayName { get; }
     bool   IsOpen      { get; }
@@ -112,6 +116,11 @@ public sealed record RoomConfig
     public int     IdleTtlSeconds     { get; init; } = 300;
     public int     MaxEntities        { get; init; } = 4096;   // must be <= 65535 (slot addressing)
     public RoomMode Mode              { get; init; } = RoomMode.Relay;
+    /// k-nearest visibility cap. Lives here, not only in ReplicationOptions, because WelcomeEvent must
+    /// carry it and the handshake may read nothing but immutable room config across threads — and because
+    /// it is the one AOI cap a game legitimately wants to tune per room. The room factory feeds
+    /// ReplicationOptions from this value.
+    public int     MaxVisibleEntities { get; init; } = 64;
     // World bounds every quantized value in this room is expressed against. Echoed in WelcomeEvent;
     // changing them mid-room is impossible by construction (the room is recreated instead).
     public float   WorldOriginX       { get; init; } = -2048f;
@@ -130,20 +139,33 @@ public readonly struct InboundMessage
     public readonly int Length;
 }
 
+/// Everything the handshake needs to build a WelcomeEvent, handed back by the room because the room —
+/// not the transport — owns membership, host promotion, resume keys and the tick counter. A record
+/// struct so a join allocates only its key.
+public readonly record struct JoinGrant(
+    uint ClientId, uint HostClientId, uint ServerTick, byte[] ResumeKey, bool Resumed);
+
 public interface IRoom
 {
     RoomConfig Config      { get; }
     int        PlayerCount { get; }
     /// Longest-present member, or 0 when the room is empty. Announced with HostChangedEvent on change.
     uint       HostClientId { get; }
+    /// The tick published by the room's own thread. A volatile read, cheap enough for a socket thread to
+    /// stamp a PongEvent with — SnapshotStats() is not, since it allocates a record and samples histograms.
+    uint       ServerTick  { get; }
     DateTimeOffset CreatedAt { get; }
     DateTimeOffset LastActivityAt { get; }
-    bool TryJoin(IClientConnection connection, out RejectCode reject);
+    bool TryJoin(IClientConnection connection, out JoinGrant grant, out RejectCode reject);
     /// Re-attaches a session that dropped inside its resume grace. The 16-byte key is the only
-    /// credential — a client never claims an id. False with RejectCode.None = no such pending session,
-    /// and the caller falls back to TryJoin (a failed resume is a fresh join, never an error path).
+    /// credential — a client never claims an id, so a leaked id cannot be impersonated. False with
+    /// RejectCode.None = no such pending session, and the caller falls back to TryJoin (a failed resume
+    /// is a fresh join, never an error path). The grant carries the ORIGINAL client id, which the
+    /// transport adopts before publishing the member. A non-None reject means a REAL refusal (the room is
+    /// closing or full) and the transport surfaces it instead of retrying as a join — the fallback applies
+    /// only to "this key names no pending session".
     bool TryResume(IClientConnection connection, ReadOnlySpan<byte> resumeKey,
-                   out uint resumedClientId, out RejectCode reject);
+                   out JoinGrant grant, out RejectCode reject);
     void Leave(uint clientId, LeaveReason reason);
     /// Non-blocking; false = room inbound queue full (caller drops + counts).
     bool TryEnqueueInbound(in InboundMessage message);
@@ -180,8 +202,19 @@ public readonly struct PendingKnownSetCommit
     public readonly uint ClientId;
     public readonly ushort Seq;
     public readonly bool IsFinalSnapshotFrame;
+    /// Pairs the handle with the subscriber's current pending frame, so a duplicate or stale commit is
+    /// detected rather than silently corrupting a known set. Opaque; 0 means "no frame was produced".
+    public readonly uint Token;
     public bool IsEmpty { get; }
 }
+
+/// Per-client tallies of everything a client did that the fabric refused. Lives here rather than in
+/// Rooms because Replication produces most of them and the dependency arrow only points this way;
+/// Rooms merges its own quota and chat numbers in before exposing the record through IRoom.
+/// Build the dataset now, the detector later.
+public readonly record struct ViolationCounters(
+    long Ownership, long Speed, long Mask, long Nan,
+    long Kind, long Quota, long FocusClamp, long Teleport);
 
 /// Owns entity state, AOI, per-client Seq and all hot-path encoding for ONE room. Single-threaded by
 /// contract.
@@ -238,6 +271,18 @@ public interface IRoomReplication
     /// The frame was NOT sent: discard the intended changes and leave Seq untouched, so the client never
     /// sees a gap for a frame that never existed.
     void Rollback(in PendingKnownSetCommit commit);
+
+    /// This client's violation tallies. Rooms merges its own numbers into the result.
+    ViolationCounters SnapshotViolations(uint clientId);
+
+    /// True while this client still owes snapshot frames. The snapshot cursor is core state, so the room
+    /// asks instead of keeping a copy that could drift.
+    bool IsSnapshotPending(uint clientId);
+    /// Marks cold props dirty, so the next update carries ColdDirty and the client expects the event.
+    bool TryMarkColdDirty(uint netId);
+    /// Records a spawn refused by the room's entity-kind allowlist. The policy is room data; the tally
+    /// belongs with the other per-client violation counters.
+    void CountKindViolation(uint clientId);
 }
 
 // ── Auth ───────────────────────────────────────────────────────────────────
@@ -290,13 +335,17 @@ Admin REST (`/admin/rooms`, service token) creates and destroys rooms; a sweeper
 
 These were settled by a best-practice review (Valve/Source, Quake 3, Fiedler, Overwatch's GDC netcode talk, Tribes/Halo:Reach interest management, Colyseus, Unity NGO/Mirror/FishNet/Netick, Godot, Photon, Rune, SpacetimeDB, plus browser-transport and .NET 10 specifics). They are decided, not open.
 
-**Tick loop.** A dedicated thread per room with **absolute deadlines** (`t0 + n × Stopwatch.Frequency / tickHz`), sleeping to ~2 ms short and spinning the tail, **skipping missed ticks rather than catching up**. Windows' default timer granularity is 15.625 ms — ±31% jitter on a 50 ms tick — and `PeriodicTimer` silently coalesces missed ticks. The spin tail is **conditional** (coarse-granularity platforms, or rooms above a player threshold): 64 idle rooms each burning 4% of a core to spin is a bad trade, and production is Linux, where plain sleeping is ~1 ms accurate.
+**Tick loop.** A dedicated thread per room with **absolute deadlines** (`t0 + n × Stopwatch.Frequency / tickHz`), sleeping to a margin short of the deadline and spinning the tail, **skipping missed ticks rather than catching up**. `PeriodicTimer` silently coalesces missed ticks, which is why it is not used.
+
+**The spin margin must exceed the platform's timer slice**, not merely be smaller than the tick. Windows' default slice is 15.625 ms, so a sleep aimed 2 ms short of the deadline routinely wakes up *past* it and the tail never gets to absorb anything. Measured on one Windows box with an otherwise-empty 20 Hz loop: a 2 ms margin gives **p50 6.7 ms late**, p99 24.7 ms — every tick late, systematically — while a 17 ms margin gives **p50 0.001 ms**, p99 11 ms (the p99 being that loaded box's own scheduling noise; an ideal loop measured 9.5 ms on it at the same moment). So the margin is platform-dependent: ~17 ms where the timer is coarse, 2 ms where a sleep is already ~1 ms accurate.
+
+The spin tail is **conditional** — coarse-granularity platform, or a room above a player threshold, and in both cases only while the room actually has members. 64 idle rooms each burning a core fraction to busy-wait is a bad trade, nobody can feel an empty room's jitter, and production is Linux, where plain sleeping is ~1 ms accurate anyway. Tick **start jitter** is a first-class metric (`RoomStats.TickJitterMsP99`) precisely because it is what proves the loop works; the tick-body histogram cannot see it.
 
 **GC.** Server GC, concurrent, with **DATAS explicitly off** (`GarbageCollectionAdaptationMode = 0`) — it is enabled by default with Server GC since .NET 9, ramps heap count reactively and schedules full compacting collections, with 1.16–1.69× regressions reported on latency-sensitive workloads. Already applied in `Directory.Build.props`; do not remove it.
 
 **Transport hardening.** Never enable `permessage-deflate` (64–316 KiB of zlib context per connection, and context takeover breaks datagram portability) — with a handshake test asserting no `Sec-WebSocket-Extensions` in the 101. Pin `/ws` to HTTP/1.1 (browsers negotiate RFC 8441 WebSockets-over-HTTP/2 by default — pure overhead for one long-lived binary socket). `KeepAliveInterval`/`KeepAliveTimeout` at 15 s so protocol-level pings survive throttled tabs and dead mobile sockets are detected. Set `MaxConcurrentUpgradedConnections` explicitly; Kestrel's default is unlimited.
 
-**Pre-auth gate.** A 2 s handshake timeout, exactly **one** frame of ≤2 KiB accepted before authentication, no client id or room state allocated until then, an Origin allowlist, a new-connection token bucket per IP, and a global pre-auth connection cap. The token stays in the first frame — **never** in the query string (query strings land in access logs and referrers).
+**Pre-auth gate.** A 2 s handshake timeout, exactly **one** frame of ≤2 KiB accepted before authentication, no client id or room state allocated until then, an Origin allowlist, a new-connection token bucket per IP, and a **per-IP** pre-auth connection cap (`MaxPreAuthConnectionsPerIp`; the process-wide ceiling is already `MaxTotalConnections`). The token stays in the first frame — **never** in the query string (query strings land in access logs and referrers). The handshake deadline is enforced by the supervisor's 1 s sweep rather than 600 timers, so the effective kill window is the deadline plus one sweep.
 
 **Serialization.** All control messages are version-tolerant with explicit member ordering **from v2 onwards**, because retrofitting that is itself a wire break. **Do not use MemoryPack's TypeScript generator** — it has an open nullable-float correctness bug; hand-write the client control codecs and gate CI on golden vectors produced by the C# side.
 
@@ -316,7 +365,7 @@ Every key below is read by code. The composition root binds, validates and fails
 |---|---|---|
 | `MaxRooms` | 256 | Rooms |
 | `MaxTotalConnections` | 4096 | Net |
-| `MaxConcurrentUpgradedConnections` | 4096 | Net |
+| `MaxConcurrentUpgradedConnections` | 4096 | Net declares and validates it; the composition root applies it to Kestrel |
 | `InboundQueueCapacity` | 4096 | both — **write it explicitly**, the two types' built-in defaults differ |
 | `OutboundControlQueueCapacity` | 64 | Net |
 | `OutboundHotQueueCapacity` | 8 | Net — a deep hot queue only buffers staleness; overflow means resync |
@@ -329,13 +378,17 @@ Every key below is read by code. The composition root binds, validates and fails
 | `MaxFrameBytes` | 16384 | Rooms — control-frame ceiling |
 | `MaxBytesPerClientPerTick` | 1100 | Replication — one MSS / one future datagram |
 | `MaxEntersPerTick` | 24 | Replication |
-| `MaxVisibleEntities` | 64 | Replication — k-nearest by squared distance |
+| `MaxVisibleEntities` | 64 | Replication — k-nearest by squared distance, applied to the exit-radius set |
 | `AoiExitFactor` | 1.25 | Replication — hysteresis |
+| `MaxEntitySpeed` | 2000 | Replication — units/s for the counted-only Level-1 speed check (125 units per tick at 20 Hz) |
+| `MaxSpectatorFocusSpeed` | 2000 | Replication — units/s cap on free-coordinate focus movement |
 | `MaxSnapshotFramesPerTick` | 8 | Rooms |
 | `MaxConsecutiveTickFailures` | 5 | Rooms |
 | `IdleSweepIntervalSeconds` | 15 | Rooms |
 | `RoomCreationGraceSeconds` | 30 | Rooms |
-| `ResumeGraceSeconds` | 30 | Rooms |
+| `ResumeGraceSeconds` | 30 | Rooms — 0 disables the grace, and a drop then leaves with `Disconnected` |
+| `SpinTailPlayerThreshold` | 32 | Rooms — the tick loop spins its tail on a coarse-granularity platform, or above this many players; 0 always spins |
+| `MaxColdPropsPerSecond` | 2 | Rooms — **per entity**; the `Quotas` twin of this name is per connection |
 | `MaxChatPerMinute` | 10 | Rooms — room-level; the connection-level twin lives in `Quotas` |
 | `MaxChatLength` | 240 | Rooms |
 | `RestrictRoomVarsToHost` | true | Rooms |
@@ -382,7 +435,7 @@ There is deliberately **no** `Rooms:Server:TickHz`: the tick rate is per room, d
 | `ServiceToken` | *(required in Production; empty ⇒ the admin API denies everything)* |
 | `AllowedOrigins` | *(empty = any, development only)* |
 
-**`Rooms:Defaults`** — per-room values substituted when a create request omits them: `MaxPlayers` 64, `TickHz` 20, `AoiRadius` 1200, `IdleTtlSeconds` 300, `MaxEntities` 4096, `Mode` `Relay`, `WorldOriginX` −2048, `WorldOriginY` −2048, `WorldSize` 4096.
+**`Rooms:Defaults`** — per-room values substituted when a create request omits them: `MaxPlayers` 64, `TickHz` 20, `AoiRadius` 1200, `IdleTtlSeconds` 300, `MaxEntities` 4096, `MaxVisibleEntities` 64, `Mode` `Relay`, `WorldOriginX` −2048, `WorldOriginY` −2048, `WorldSize` 4096.
 
 **`Metrics`** — `Path` `/metrics`, `RequireServiceToken` true in production, `MaxSeriesPerMetric` 64.
 

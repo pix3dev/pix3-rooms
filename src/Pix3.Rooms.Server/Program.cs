@@ -9,7 +9,10 @@ using Pix3.Rooms.Server.Rooms;
 
 // Transport keepalive. The protocol has no server-to-client ping, so a silent-but-alive peer is detected
 // by WebSocket control pings; the application idle timeout covers a peer that is alive but not playing.
+// The timeout is what turns the ping into a detector rather than a formality: without it a dead mobile
+// socket (radio gone, no FIN) stays "open" until TCP gives up, holding a connection slot and a room seat.
 TimeSpan keepAliveInterval = TimeSpan.FromSeconds(15);
+TimeSpan keepAliveTimeout = TimeSpan.FromSeconds(15);
 
 try
 {
@@ -18,7 +21,11 @@ try
 
     WebApplication app = builder.Build();
 
-    app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = keepAliveInterval });
+    app.UseWebSockets(new WebSocketOptions
+    {
+        KeepAliveInterval = keepAliveInterval,
+        KeepAliveTimeout = keepAliveTimeout,
+    });
 
     // Identity only: no capability, no configuration, nothing that helps an unauthenticated prober.
     app.MapGet("/", () => Results.Text($"pix3-rooms {ServerRuntimeInfo.Version}\n", "text/plain; charset=utf-8"));
@@ -48,6 +55,7 @@ try
     AuthOptions authOptions = app.Services.GetRequiredService<AuthOptions>();
     NetOptions netOptions = app.Services.GetRequiredService<NetOptions>();
     MetricsOptions metricsOptions = app.Services.GetRequiredService<MetricsOptions>();
+    ConfiguredOriginPolicy originPolicy = app.Services.GetRequiredService<ConfiguredOriginPolicy>();
     RoomServerOptions roomServerOptions = app.Services.GetRequiredService<IOptions<RoomServerOptions>>().Value;
     RoomDefaultsOptions roomDefaults = app.Services.GetRequiredService<IOptions<RoomDefaultsOptions>>().Value;
 
@@ -56,17 +64,20 @@ try
     roomServerOptions.Normalize();
 
     app.Logger.LogInformation(
-        "pix3-rooms {Version} ready: env={Environment} auth={AuthMode} ws={WebSocketPath} metrics={MetricsPath} "
-        + "metricsRequiresServiceToken={MetricsRequiresServiceToken} maxRooms={MaxRooms} "
-        + "maxTotalConnections={MaxTotalConnections} defaultTickHz={DefaultTickHz}",
+        "pix3-rooms {Version} ready: env={Environment} auth={AuthMode} origins={AllowedOrigins} "
+        + "ws={WebSocketPath} metrics={MetricsPath} metricsRequiresServiceToken={MetricsRequiresServiceToken} "
+        + "maxRooms={MaxRooms} maxTotalConnections={MaxTotalConnections} "
+        + "maxConcurrentUpgraded={MaxConcurrentUpgradedConnections} defaultTickHz={DefaultTickHz}",
         ServerRuntimeInfo.Version,
         app.Environment.EnvironmentName,
         authOptions.Mode,
+        originPolicy.AllowsAnyOrigin ? "any (development only)" : string.Join(',', originPolicy.AllowedOrigins),
         RoomIdPolicy.WebSocketRoute,
         metricsOptions.Path,
         metricsOptions.RequireServiceToken,
         roomServerOptions.MaxRooms,
         netOptions.MaxTotalConnections,
+        netOptions.MaxConcurrentUpgradedConnections,
         roomDefaults.TickHz);
 
     app.Run();

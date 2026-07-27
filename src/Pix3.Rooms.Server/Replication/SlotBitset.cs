@@ -70,6 +70,50 @@ public sealed class SlotBitset
         Array.Copy(source._words, _words, _words.Length);
     }
 
+    /// <summary>Adds every bit of <paramref name="other"/> (<c>this |= other</c>). Capacities must match.</summary>
+    public void UnionWith(SlotBitset other)
+    {
+        Debug.Assert(other._words.Length == _words.Length, "bitset capacity mismatch");
+        ulong[] words = _words;
+        ulong[] source = other._words;
+        for (int i = 0; i < words.Length; i++)
+        {
+            words[i] |= source[i];
+        }
+    }
+
+    /// <summary>Keeps only bits also set in <paramref name="other"/> (<c>this &amp;= other</c>).</summary>
+    public void IntersectWith(SlotBitset other)
+    {
+        Debug.Assert(other._words.Length == _words.Length, "bitset capacity mismatch");
+        ulong[] words = _words;
+        ulong[] source = other._words;
+        for (int i = 0; i < words.Length; i++)
+        {
+            words[i] &= source[i];
+        }
+    }
+
+    /// <summary>
+    /// Adds the bits set in all three operands (<c>this |= a &amp; b &amp; c</c>) in a single word-wise
+    /// pass. This is how a client's owed-update set is folded in without materialising an intermediate
+    /// bitset — and without an allocation on the commit path.
+    /// </summary>
+    public void UnionWithIntersection(SlotBitset a, SlotBitset b, SlotBitset c)
+    {
+        Debug.Assert(a._words.Length == _words.Length, "bitset capacity mismatch");
+        Debug.Assert(b._words.Length == _words.Length, "bitset capacity mismatch");
+        Debug.Assert(c._words.Length == _words.Length, "bitset capacity mismatch");
+        ulong[] words = _words;
+        ulong[] wa = a._words;
+        ulong[] wb = b._words;
+        ulong[] wc = c._words;
+        for (int i = 0; i < words.Length; i++)
+        {
+            words[i] |= wa[i] & wb[i] & wc[i];
+        }
+    }
+
     /// <summary>Population count. Metrics-grade utility, not on the per-entity hot path.</summary>
     public int Count()
     {

@@ -8,7 +8,9 @@ namespace Pix3.Rooms.Server.Net;
 /// <b>Ownership.</b> The buffer belongs to <see cref="FramePool"/>. Ownership transfers to the
 /// connection on a successful <see cref="IClientConnection.TryEnqueue"/> and the send loop returns it
 /// to the pool once written. When <c>TryEnqueue</c> returns false the caller still owns the buffer and
-/// must call <see cref="FramePool.Return"/> itself, or it leaks out of the pool.
+/// must call <see cref="FramePool.Return"/> itself, or it leaks out of the pool — and that is true on
+/// <b>both</b> lanes: a full control lane closes the connection <i>and</i> hands the buffer back, so the
+/// return path is identical whichever lane failed.
 /// </para>
 /// <para>
 /// <b>No refcounting.</b> One frame belongs to exactly one connection. Broadcast encodes once into a

@@ -13,7 +13,15 @@ namespace Pix3.Rooms.Server.Net;
 /// </remarks>
 public interface IClientConnection
 {
-    /// <summary>Room-unique id, monotonic per server. Also the entity owner id.</summary>
+    /// <summary>
+    /// Room-unique, monotonic per server. Also the entity owner id.
+    /// </summary>
+    /// <remarks>
+    /// Allocated by <c>Net</c> only <b>after</b> the handshake authenticates — an unauthenticated socket
+    /// consumes no id and no room state, and reports <c>0</c> here — and replaced by the resumed session's
+    /// original id when a resume succeeds (<c>Net</c> owns the allocator; the room hands the old id back in
+    /// a <c>JoinGrant</c>, and the transport adopts it before the member is published).
+    /// </remarks>
     uint ClientId { get; }
 
     /// <summary>Remote address, used for per-IP connection caps and logging.</summary>
@@ -26,15 +34,23 @@ public interface IClientConnection
     bool IsOpen { get; }
 
     /// <summary>
-    /// Enqueue an already-encoded frame. False = queue full or connection closed, in which case the
-    /// caller keeps ownership of <paramref name="frame"/> and must return its buffer to
-    /// <see cref="FramePool"/>.
+    /// Enqueue an already-encoded frame on a lane. False = queue full or closed, in which case the caller
+    /// still owns <paramref name="frame"/> and must return its buffer to <see cref="FramePool"/>.
+    /// <b>Ownership transfers on success only.</b>
     /// </summary>
+    /// <param name="frame">A complete <c>[TypeId][payload]</c> frame in a rented buffer.</param>
+    /// <param name="lane">
+    /// Which queue to use. The failure policies differ and that is the point:
+    /// <see cref="FrameLane.Control"/> additionally <i>closes the connection</i> on a full queue, because a
+    /// control frame that is silently dropped has no repair mechanism; <see cref="FrameLane.Hot"/> merely
+    /// reports failure, and the caller must roll back that frame's known-set changes and mark the client
+    /// for resync.
+    /// </param>
     /// <remarks>Non-blocking by contract: the room tick must never wait on a socket.</remarks>
-    bool TryEnqueue(in OutboundFrame frame);
+    bool TryEnqueue(in OutboundFrame frame, FrameLane lane);
 
     /// <summary>
-    /// Send a <see cref="RejectEvent"/> (when <paramref name="code"/> is not
+    /// Send a <see cref="RejectedEvent"/> (when <paramref name="code"/> is not
     /// <see cref="RejectCode.None"/>) and close with the status from
     /// <see cref="RejectCodeExtensions.ToWebSocketCloseStatus"/>. Idempotent and non-blocking.
     /// </summary>

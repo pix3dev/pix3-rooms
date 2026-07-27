@@ -3,14 +3,14 @@ using MemoryPack;
 namespace Pix3.Rooms.Protocol;
 
 /// <summary>
-/// C→S, TypeId <see cref="MessageTypeIds.LeaveRequest"/>. Empty payload — a voluntary goodbye, so
-/// peers see <c>LeaveReason.LeftVoluntarily</c> instead of a plain disconnect.
+/// C→S, TypeId <see cref="MessageTypeIds.LeaveCommand"/>. Empty payload: a voluntary goodbye, so
+/// peers see <see cref="LeaveReason.LeftVoluntarily"/> instead of a plain disconnect.
 /// </summary>
-[MemoryPackable]
-public sealed partial class LeaveRequest
+[MemoryPackable(GenerateType.VersionTolerant)]
+public sealed partial class LeaveCommand
 {
     /// <summary>MemoryPack requires a public parameterless constructor.</summary>
-    public LeaveRequest()
+    public LeaveCommand()
     {
     }
 }

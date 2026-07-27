@@ -5,10 +5,15 @@ namespace Pix3.Rooms.Protocol;
 
 /// <summary>
 /// A <c>netId</c> is an opaque <see cref="uint"/> handle for one entity inside one room, packed as
-/// <c>slot | (generation &lt;&lt; 20)</c>: the low 20 bits index a slot in the entity table, the high
-/// 12 bits are the slot's reuse generation.
+/// <c>slot | (generation &lt;&lt; 16)</c>: the low 16 bits index a slot in the entity table, the high
+/// 16 bits are the slot's reuse generation.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Why 16/16.</b> Server→client records address entities by <c>u16 Slot</c>, which caps
+/// <c>MaxEntities</c> at 65535 anyway, so slot bits beyond 16 are unusable. Spending them on
+/// generations buys 65 536 reuses per slot instead of 4 096, for free.
+/// </para>
 /// <para>
 /// <b>Reuse rule.</b> When an entity is despawned its slot goes back to the free list; the next
 /// entity placed in that slot must be packed with <c>generation + 1</c>. A
@@ -25,22 +30,22 @@ namespace Pix3.Rooms.Protocol;
 public static class NetId
 {
     /// <summary>Bits reserved for the slot index.</summary>
-    public const int SlotBits = 20;
+    public const int SlotBits = 16;
 
     /// <summary>Bits reserved for the reuse generation.</summary>
-    public const int GenerationBits = 12;
+    public const int GenerationBits = 16;
 
     /// <summary>Mask isolating the slot bits.</summary>
-    public const uint SlotMask = (1u << SlotBits) - 1u;          // 0x000FFFFF
+    public const uint SlotMask = (1u << SlotBits) - 1u;          // 0x0000FFFF
 
     /// <summary>Mask isolating the generation bits, already shifted into place.</summary>
-    public const uint GenerationMask = ~SlotMask;                // 0xFFF00000
+    public const uint GenerationMask = ~SlotMask;                // 0xFFFF0000
 
     /// <summary>Largest addressable slot index.</summary>
-    public const int MaxSlot = (1 << SlotBits) - 1;              // 1_048_575
+    public const int MaxSlot = (1 << SlotBits) - 1;              // 65_535
 
     /// <summary>Largest generation a slot may reach before it must be retired.</summary>
-    public const int MaxGeneration = (1 << GenerationBits) - 1;  // 4_095
+    public const int MaxGeneration = (1 << GenerationBits) - 1;  // 65_535
 
     /// <summary>Reserved sentinel meaning "no entity". Never a valid live id (generations start at 1).</summary>
     public const uint None = 0u;

@@ -13,6 +13,21 @@ namespace Pix3.Rooms.Server.Admin;
 /// <param name="IdleTtlSeconds">Seconds the room may stay empty before the sweeper destroys it.</param>
 /// <param name="MaxEntities">Entity-table capacity.</param>
 /// <param name="Mode">Authority model: <c>Relay</c> or <c>Authoritative</c> (case-insensitive).</param>
+/// <param name="MaxVisibleEntities">
+/// k-nearest visibility cap per client. The one AOI cap a game legitimately tunes per room, and the value
+/// <c>WelcomeEvent</c> carries.
+/// </param>
+/// <param name="WorldOriginX">World-space X of the low corner of the room's quantization range.</param>
+/// <param name="WorldOriginY">World-space Y of the low corner of the room's quantization range.</param>
+/// <param name="WorldSize">
+/// Side length of the square world every quantized value in the room is expressed against. Required when
+/// either origin is supplied: half a world is not a world.
+/// </param>
+/// <param name="AllowedKinds">
+/// Entity kinds this room accepts, as indexes into the build's prefab table. Omitted or empty inherits
+/// <c>Rooms:Defaults:AllowedKinds</c>; a room that ends up with an empty list accepts any kind, which the
+/// composition root refuses to start with in Production.
+/// </param>
 public sealed record CreateRoomRequest(
     string? RoomId = null,
     string? ProjectId = null,
@@ -22,7 +37,12 @@ public sealed record CreateRoomRequest(
     float? AoiRadius = null,
     int? IdleTtlSeconds = null,
     int? MaxEntities = null,
-    string? Mode = null);
+    string? Mode = null,
+    int? MaxVisibleEntities = null,
+    float? WorldOriginX = null,
+    float? WorldOriginY = null,
+    float? WorldSize = null,
+    IReadOnlyList<int>? AllowedKinds = null);
 
 /// <summary>A room's effective configuration plus the identity clients need to connect.</summary>
 /// <param name="RoomId">Room id.</param>
@@ -34,6 +54,11 @@ public sealed record CreateRoomRequest(
 /// <param name="IdleTtlSeconds">Empty-room TTL.</param>
 /// <param name="MaxEntities">Entity-table capacity.</param>
 /// <param name="Mode">Authority model name.</param>
+/// <param name="MaxVisibleEntities">k-nearest visibility cap per client.</param>
+/// <param name="WorldOriginX">World-space X of the low corner of the quantization range.</param>
+/// <param name="WorldOriginY">World-space Y of the low corner of the quantization range.</param>
+/// <param name="WorldSize">Side length of the square world quantized values are expressed against.</param>
+/// <param name="AllowedKinds">Accepted entity kinds; empty means any kind is accepted.</param>
 /// <param name="PlayerCount">Members currently joined.</param>
 /// <param name="CreatedAt">When the room was created.</param>
 /// <param name="LastActivityAt">Last join, leave or inbound message.</param>
@@ -48,6 +73,11 @@ public sealed record RoomDescriptor(
     int IdleTtlSeconds,
     int MaxEntities,
     string Mode,
+    int MaxVisibleEntities,
+    float WorldOriginX,
+    float WorldOriginY,
+    float WorldSize,
+    IReadOnlyList<ushort> AllowedKinds,
     int PlayerCount,
     DateTimeOffset CreatedAt,
     DateTimeOffset LastActivityAt,
@@ -59,18 +89,57 @@ public sealed record RoomDescriptor(
 /// <param name="ServerTick">Most recently completed tick.</param>
 /// <param name="TickMsP50">Median tick duration, milliseconds.</param>
 /// <param name="TickMsP99">99th-percentile tick duration, milliseconds.</param>
+/// <param name="TickJitterMsP99">
+/// 99th-percentile lateness of a tick's start against its absolute deadline — the number that proves the
+/// scheduler is working, which tick body time cannot.
+/// </param>
 /// <param name="BytesOutPerSecond">Recent outbound throughput.</param>
 /// <param name="DroppedFrames">Frames dropped because a queue was full.</param>
 /// <param name="BudgetOverruns">Ticks that exceeded their budget.</param>
+/// <param name="Resyncs">Known-set rebuilds (hot-lane overflow, <c>ResyncCommand</c>).</param>
+/// <param name="Violations">Sum of every member's violation counters at the last publish.</param>
 public sealed record RoomStatsResponse(
     int PlayerCount,
     int EntityCount,
     uint ServerTick,
     double TickMsP50,
     double TickMsP99,
+    double TickJitterMsP99,
     long BytesOutPerSecond,
     long DroppedFrames,
-    long BudgetOverruns);
+    long BudgetOverruns,
+    long Resyncs,
+    long Violations);
+
+/// <summary>
+/// One client's violation tallies, as <c>GET /admin/rooms/{roomId}/violations/{clientId}</c> returns them.
+/// </summary>
+/// <remarks>
+/// The dataset the anti-cheat detector will eventually run on. Every field is a lifetime count for this
+/// session; a client the room does not know reports zeros rather than 404, because "no violations" and
+/// "never seen" are the same answer to the only question this endpoint exists to answer.
+/// </remarks>
+/// <param name="RoomId">Room the client belongs to.</param>
+/// <param name="ClientId">Client the tallies are for.</param>
+/// <param name="Ownership">Entity mutations aimed at an entity the sender does not own.</param>
+/// <param name="Speed">Moves that failed the counted-only Level-1 speed check.</param>
+/// <param name="Mask">Illegal delta masks and records the decoder refused.</param>
+/// <param name="Nan">Non-finite floats (spectator focus is the only inbound float left).</param>
+/// <param name="Kind">Spawns naming an entity kind outside the room's allowlist.</param>
+/// <param name="Quota">Connection- and room-level quota refusals attributed to this client.</param>
+/// <param name="FocusClamp">Spectator focus moves that hit the per-tick speed clamp.</param>
+/// <param name="Teleport">Client-set teleport bits (legitimate under client authority, so counted).</param>
+public sealed record RoomViolationsResponse(
+    string RoomId,
+    uint ClientId,
+    long Ownership,
+    long Speed,
+    long Mask,
+    long Nan,
+    long Kind,
+    long Quota,
+    long FocusClamp,
+    long Teleport);
 
 /// <summary>One room as the admin API returns it.</summary>
 /// <param name="Room">Configuration and connection info.</param>

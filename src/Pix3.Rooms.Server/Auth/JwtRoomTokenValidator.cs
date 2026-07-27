@@ -53,10 +53,20 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
     private readonly JsonWebTokenHandler _handler = new();
     private readonly TokenValidationParameters _parameters;
     private readonly ILogger<JwtRoomTokenValidator> _logger;
+    private readonly IAuthFailureSink _failures;
 
     /// <summary>Creates the validator. Throws when the configuration could never validate a token.</summary>
+    /// <param name="options">Auth configuration; the signing secret, issuer and audience must be usable.</param>
+    /// <param name="logger">Logger for refusals (never logs the token itself).</param>
+    /// <param name="failures">
+    /// Where the fine-grained refusal reason is counted. Optional so an existing composition root keeps
+    /// compiling; pass the transport's counter surface so <c>auth_failures_total{reason}</c> is populated.
+    /// </param>
     /// <exception cref="InvalidOperationException">The signing secret, issuer or audience is unusable.</exception>
-    public JwtRoomTokenValidator(AuthOptions options, ILogger<JwtRoomTokenValidator> logger)
+    public JwtRoomTokenValidator(
+        AuthOptions options,
+        ILogger<JwtRoomTokenValidator> logger,
+        IAuthFailureSink? failures = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
@@ -85,6 +95,7 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
         }
 
         _logger = logger;
+        _failures = failures ?? NullAuthFailureSink.Instance;
         _parameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -114,14 +125,24 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
         claims = RejectedClaims;
         reject = RejectCode.InvalidToken;
 
-        if (string.IsNullOrWhiteSpace(token) || string.IsNullOrEmpty(requestedRoomId))
+        if (string.IsNullOrWhiteSpace(token))
         {
+            _failures.OnAuthFailure(AuthFailureCause.MissingToken);
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(requestedRoomId))
+        {
+            // No room to validate against: the handshake resolves the room id before calling us, so this
+            // is a caller bug rather than a client one, and it is not a token failure.
+            _failures.OnAuthFailure(AuthFailureCause.Other);
             return false;
         }
 
         if (token.Length > MaxTokenLength)
         {
             _logger.LogDebug("Refused a room token of {Length} characters", token.Length);
+            _failures.OnAuthFailure(AuthFailureCause.MalformedToken);
             return false;
         }
 
@@ -136,12 +157,14 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Room-token validation threw");
+            _failures.OnAuthFailure(AuthFailureCause.Other);
             return false;
         }
 
         if (!result.IsValid)
         {
             reject = MapFailure(result.Exception);
+            _failures.OnAuthFailure(MapCause(result.Exception));
             _logger.LogDebug("Rejected a room token: {RejectCode} ({Detail})", reject, result.Exception?.GetType().Name ?? "unspecified");
             return false;
         }
@@ -149,18 +172,21 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
         if (result.SecurityToken is not JsonWebToken jwt)
         {
             _logger.LogWarning("Room-token validation produced an unexpected token type {TokenType}", result.SecurityToken?.GetType().Name ?? "null");
+            _failures.OnAuthFailure(AuthFailureCause.Other);
             return false;
         }
 
         if (!jwt.TryGetPayloadValue(RoomIdClaim, out string tokenRoomId) || string.IsNullOrEmpty(tokenRoomId))
         {
             _logger.LogDebug("Rejected a room token with no {Claim} claim", RoomIdClaim);
+            _failures.OnAuthFailure(AuthFailureCause.MalformedToken);
             return false;
         }
 
         if (!string.Equals(tokenRoomId, requestedRoomId, StringComparison.Ordinal))
         {
             reject = RejectCode.TokenRoomMismatch;
+            _failures.OnAuthFailure(AuthFailureCause.RoomMismatch);
             return false;
         }
 
@@ -168,6 +194,7 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
         if (string.IsNullOrEmpty(subject))
         {
             _logger.LogDebug("Rejected a room token with no sub claim");
+            _failures.OnAuthFailure(AuthFailureCause.MalformedToken);
             return false;
         }
 
@@ -222,5 +249,25 @@ public sealed class JwtRoomTokenValidator : IRoomTokenValidator
     {
         SecurityTokenExpiredException => RejectCode.TokenExpired,
         _ => RejectCode.InvalidToken,
+    };
+
+    /// <summary>
+    /// The operational reason behind a refusal, at a finer grain than the wire-facing
+    /// <see cref="RejectCode"/>. "Bad signature" and "not a JWT at all" are the same
+    /// <see cref="RejectCode.InvalidToken"/> to the client but very different alerts: the first says a key
+    /// rotation went wrong, the second says something is probing the port.
+    /// </summary>
+    private static AuthFailureCause MapCause(Exception? exception) => exception switch
+    {
+        SecurityTokenExpiredException => AuthFailureCause.Expired,
+        // SecurityTokenSignatureKeyNotFoundException derives from this one, so both a wrong signature and a
+        // key we do not hold land here — which is right: operationally they are the same alert.
+        SecurityTokenInvalidSignatureException => AuthFailureCause.InvalidSignature,
+        SecurityTokenInvalidAlgorithmException => AuthFailureCause.InvalidSignature,
+        SecurityTokenMalformedException => AuthFailureCause.MalformedToken,
+        SecurityTokenInvalidAudienceException => AuthFailureCause.MalformedToken,
+        SecurityTokenInvalidIssuerException => AuthFailureCause.MalformedToken,
+        ArgumentException => AuthFailureCause.MalformedToken,
+        _ => AuthFailureCause.Other,
     };
 }

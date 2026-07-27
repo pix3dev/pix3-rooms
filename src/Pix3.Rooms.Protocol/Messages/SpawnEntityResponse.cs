@@ -3,23 +3,26 @@ using MemoryPack;
 namespace Pix3.Rooms.Protocol;
 
 /// <summary>
-/// S→C, TypeId <see cref="MessageTypeIds.EntitySpawnAckEvent"/>. The answer to one
-/// <see cref="EntitySpawnRequest"/>, sent only to the requester.
+/// S→C, TypeId <see cref="MessageTypeIds.SpawnEntityResponse"/>. The answer to one
+/// <see cref="SpawnEntityRequest"/>, sent only to the requester.
 /// </summary>
-[MemoryPackable]
-public sealed partial class EntitySpawnAckEvent
+[MemoryPackable(GenerateType.VersionTolerant)]
+public sealed partial class SpawnEntityResponse
 {
-    /// <summary>Echo of <see cref="EntitySpawnRequest.RequestId"/>.</summary>
+    /// <summary>Echo of <see cref="SpawnEntityRequest.RequestId"/>.</summary>
+    [MemoryPackOrder(0)]
     public uint RequestId { get; set; }
 
     /// <summary>The assigned net id, or 0 when the spawn was refused.</summary>
+    [MemoryPackOrder(1)]
     public uint NetId { get; set; }
 
-    /// <summary>A <c>RejectCode</c> value; 0 means the spawn succeeded.</summary>
+    /// <summary>A <see cref="Protocol.RejectCode"/> value; 0 means the spawn succeeded.</summary>
+    [MemoryPackOrder(2)]
     public ushort RejectCode { get; set; }
 
     /// <summary>MemoryPack requires a public parameterless constructor.</summary>
-    public EntitySpawnAckEvent()
+    public SpawnEntityResponse()
     {
     }
 }

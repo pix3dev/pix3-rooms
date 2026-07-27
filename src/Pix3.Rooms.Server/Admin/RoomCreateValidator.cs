@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using Pix3.Rooms.Protocol;
 using Pix3.Rooms.Server.Rooms;
 
 namespace Pix3.Rooms.Server.Admin;
@@ -164,6 +165,25 @@ public static class RoomCreateValidator
             }
         }
 
+        int maxVisibleEntities = defaults.MaxVisibleEntities;
+        if (request.MaxVisibleEntities is int requestedMaxVisible)
+        {
+            if (RoomLimits.IsValidMaxVisibleEntities(requestedMaxVisible))
+            {
+                maxVisibleEntities = requestedMaxVisible;
+            }
+            else
+            {
+                problems.Add(new AdminFieldError(
+                    "maxVisibleEntities",
+                    $"Must be between {RoomLimits.MinMaxVisibleEntities} and {RoomLimits.MaxMaxVisibleEntities}."));
+            }
+        }
+
+        TryResolveWorld(request, defaults, problems, out float worldOriginX, out float worldOriginY, out float worldSize);
+
+        ushort[] allowedKinds = ResolveAllowedKinds(request.AllowedKinds, defaults, problems);
+
         RoomMode mode = defaults.Mode;
         string? requestedMode = Trim(request.Mode);
         if (requestedMode is not null)
@@ -198,9 +218,149 @@ public static class RoomCreateValidator
             IdleTtlSeconds = idleTtlSeconds,
             MaxEntities = maxEntities,
             Mode = mode,
+            MaxVisibleEntities = maxVisibleEntities,
+            WorldOriginX = worldOriginX,
+            WorldOriginY = worldOriginY,
+            WorldSize = worldSize,
+            AllowedKinds = allowedKinds,
         };
         errors = NoErrors;
         return true;
+    }
+
+    /// <summary>
+    /// Resolves the room's world bounds, adding a field error instead of clamping anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A world is resolved as one value: supplying an origin without a size is refused rather than
+    /// silently paired with the default size, because mixing a caller's origin with a default extent
+    /// produces a world nobody asked for and every quantized value in the room is expressed against it.
+    /// </para>
+    /// <para>
+    /// The final check is <see cref="RoomLimits.IsValidWorld"/> — the quantizer's own predicate, float32
+    /// precision ratio included. Surfacing it here turns "the room could not be created" into a 400 with
+    /// the offending field, instead of an <c>ArgumentOutOfRangeException</c> from a room factory and a 500.
+    /// </para>
+    /// </remarks>
+    private static void TryResolveWorld(
+        CreateRoomRequest request,
+        RoomCreationDefaults defaults,
+        List<AdminFieldError> problems,
+        out float originX,
+        out float originY,
+        out float size)
+    {
+        originX = defaults.WorldOriginX;
+        originY = defaults.WorldOriginY;
+        size = defaults.WorldSize;
+
+        bool originSupplied = request.WorldOriginX is not null || request.WorldOriginY is not null;
+        if (request.WorldSize is not float requestedSize)
+        {
+            if (originSupplied)
+            {
+                problems.Add(new AdminFieldError(
+                    "worldSize",
+                    "Required when worldOriginX or worldOriginY is supplied: a world is set as a whole, "
+                    + "never corner-by-corner."));
+            }
+
+            return;
+        }
+
+        float requestedOriginX = request.WorldOriginX ?? defaults.WorldOriginX;
+        float requestedOriginY = request.WorldOriginY ?? defaults.WorldOriginY;
+
+        bool finite = true;
+        if (!float.IsFinite(requestedOriginX))
+        {
+            problems.Add(new AdminFieldError("worldOriginX", "Must be a finite number."));
+            finite = false;
+        }
+
+        if (!float.IsFinite(requestedOriginY))
+        {
+            problems.Add(new AdminFieldError("worldOriginY", "Must be a finite number."));
+            finite = false;
+        }
+
+        if (!float.IsFinite(requestedSize))
+        {
+            problems.Add(new AdminFieldError("worldSize", "Must be a finite number."));
+            finite = false;
+        }
+
+        if (!finite)
+        {
+            return;
+        }
+
+        if (!RoomLimits.IsValidWorld(requestedOriginX, requestedOriginY, requestedSize))
+        {
+            problems.Add(new AdminFieldError(
+                "worldSize",
+                $"World bounds ({requestedOriginX}, {requestedOriginY}, size {requestedSize}) are unusable: "
+                + $"size must be at least {WorldQuantizer.MinWorldSize} and every coordinate magnitude must "
+                + $"stay below {WorldQuantizer.MaxCoordinateToSizeRatio} x size, or float32 round-tripping "
+                + "stops being a fixed point and positions oscillate by a quantum forever."));
+            return;
+        }
+
+        originX = requestedOriginX;
+        originY = requestedOriginY;
+        size = requestedSize;
+    }
+
+    /// <summary>
+    /// Resolves the entity-kind allowlist, rejecting values outside the wire's <c>u16</c> kind space and
+    /// lists longer than <see cref="RoomLimits.MaxAllowedKinds"/>.
+    /// </summary>
+    /// <remarks>
+    /// An omitted <b>or explicitly empty</b> list inherits <c>Rooms:Defaults:AllowedKinds</c>. Treating
+    /// <c>[]</c> as "omitted" is what makes the composition root's production refusal complete: with a
+    /// non-empty configured default there is no request shape that yields a room accepting any kind.
+    /// </remarks>
+    private static ushort[] ResolveAllowedKinds(
+        IReadOnlyList<int>? requested,
+        RoomCreationDefaults defaults,
+        List<AdminFieldError> problems)
+    {
+        if (requested is null || requested.Count == 0)
+        {
+            return [.. defaults.AllowedKinds];
+        }
+
+        if (requested.Count > RoomLimits.MaxAllowedKinds)
+        {
+            problems.Add(new AdminFieldError(
+                "allowedKinds",
+                $"Must hold at most {RoomLimits.MaxAllowedKinds} entries."));
+            return [];
+        }
+
+        HashSet<ushort> seen = new(requested.Count);
+        List<ushort> accepted = new(requested.Count);
+        for (int i = 0; i < requested.Count; i++)
+        {
+            int kind = requested[i];
+            if (!RoomLimits.IsValidKind(kind))
+            {
+                problems.Add(new AdminFieldError(
+                    "allowedKinds",
+                    $"Entry {kind} is not an entity kind: kinds are u16 indexes into the build's prefab "
+                    + $"table, so every entry must be between {ushort.MinValue} and {ushort.MaxValue}."));
+                return [];
+            }
+
+            ushort value = (ushort)kind;
+            if (seen.Add(value))
+            {
+                accepted.Add(value);
+            }
+        }
+
+        return [.. accepted];
     }
 
     /// <summary>Trims a caller-supplied string, mapping blank input to null ("field omitted").</summary>

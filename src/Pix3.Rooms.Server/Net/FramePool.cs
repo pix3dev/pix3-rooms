@@ -68,8 +68,8 @@ public static class FramePool
     /// <param name="typeId">The id from <c>MessageTypeIds</c> that matches <typeparamref name="T"/>.</param>
     /// <param name="message">The message to serialize.</param>
     /// <remarks>
-    /// Only for the control plane. The hot frames (67/68/69) are hand-packed straight into a rented
-    /// buffer via <c>HotWire</c> and must never pass through MemoryPack.
+    /// Only for the control plane. The four hot-plane packets (67/68/69/130) are hand-packed straight into
+    /// a rented buffer via <c>HotWire</c> and must never pass through MemoryPack.
     /// </remarks>
     public static OutboundFrame EncodeControl<T>(byte typeId, T message)
     {

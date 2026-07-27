@@ -263,16 +263,11 @@ public sealed class RoomManager : IRoomManager, IAsyncDisposable, IDisposable
     }
 
     /// <remarks>
-    /// <see cref="TaskCreationOptions.LongRunning"/> gives the first tick a dedicated thread instead of
-    /// occupying a pool thread during startup; once the loop awaits its <c>PeriodicTimer</c> the
-    /// continuations run on the pool, which is what keeps hundreds of rooms affordable.
+    /// No <see cref="TaskCreationOptions.LongRunning"/> wrapper: a room now owns a dedicated tick thread
+    /// itself (absolute deadlines, missed ticks skipped), and <c>Room.RunAsync</c> returns a task that
+    /// completes when that thread exits. Wrapping it would only park a second thread to await the first.
     /// </remarks>
-    private Task StartRoom(RoomHandle handle)
-        => Task.Factory.StartNew(
-            () => RunRoomAsync(handle),
-            CancellationToken.None,
-            TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach,
-            TaskScheduler.Default).Unwrap();
+    private Task StartRoom(RoomHandle handle) => RunRoomAsync(handle);
 
     /// <summary>
     /// Wraps one room's loop: a loop that stops for any reason other than cancellation is fatal, so its

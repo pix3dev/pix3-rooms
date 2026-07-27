@@ -99,9 +99,13 @@ Ranges are reserved; do not allocate outside them. A `MessageTypeIds` constant i
 | 68 | `SnapshotPacket` | S→C | **hand-packed** (below) |
 | 69 | `DeltaPacket` | S→C | **hand-packed** (below) |
 | 70 | `SetEntityPropsCommand` | C→S | MemoryPack: `uint NetId`, `byte[] Json` |
-| 71 | `EntityPropsChangedEvent` | S→C | MemoryPack: `uint NetId`, `byte[] Json` |
+| 71 | `EntityPropsChangedEvent` | S→C | MemoryPack: `uint NetId`, `byte[] Json` — fanned out **room-wide**, not AOI-scoped (see below) |
 
 Spawn carries **quantized** fields, not floats: the quantized integers are the replicated values everywhere (see [Quantization](#quantization)), so a spawn must not introduce a value the delta plane could not have expressed.
+
+**Cold props are room-scoped, not AOI-scoped.** `EntityPropsChangedEvent` goes to every member of the room, rate-limited to 2/s per entity and capped at 512 B. AOI-scoping it would need a "who can currently see this entity" query and an AOI-entry hook that the replication seam does not expose; both are deferred rather than faked, and the cap plus the rate limit are what keep the room-wide fan-out affordable. Cold props are for slowly-changing metadata (a name, a skin id), never for state that belongs in the hot plane.
+
+`ServerTick` is the **scheduled** tick index, so a room that skipped ticks under load shows a gap rather than a compressed timeline. `Seq`, not `ServerTick`, is what detects a lost frame.
 
 ### Signals (128–191)
 
@@ -128,10 +132,21 @@ World bounds are declared **per room** (`WorldOriginX`, `WorldOriginY`, `WorldSi
 | Field | Wire | Encode | Decode | Precision |
 |---|---|---|---|---|
 | X, Y | `u16` | `clamp(round((v − origin) × 65535 / WorldSize), 0, 65535)` | `origin + q × WorldSize / 65535` | 1/16 unit at `WorldSize = 4096` |
-| Rot | `u8` | `round(((rot mod 2π) + 2π mod 2π) / 2π × 256) & 0xFF` | `q × 2π / 256` | 1.41° |
-| Vx, Vy | `i16` | `clamp(round(v × 8), −32768, 32767)` | `q / 8` | 0.125 u/s, ±4095 u/s |
+| Rot | `u8` | `round(w / 2π × 256) & 0xFF` where `w = ((rot mod 2π) + 2π) mod 2π` | `q × 2π / 256` | 1.41° |
+| Vx, Vy | `i16` | `clamp(round(v × 8), −32768, 32767)` | `q / 8` | 0.125 u/s, −4096.0…+4095.875 u/s |
 
 Records stay **byte-aligned** — no bit-packing — because memcpy fan-out is worth more than the last 15%.
+
+**Rounding is normative**: `round(v)` above means **exactly `floor(v + 0.5)`** — half rounding towards +∞.
+
+- C# writes `Math.Floor(v + 0.5)`. `MathF.Round` is banker's rounding and `MidpointRounding.AwayFromZero` disagrees on negative halves; neither is the rule.
+- TypeScript writes `Math.floor(v + 0.5)` too — **not** `Math.round`. They are not the same function: for `v = 0.49999999999999994` (the largest double below ½) `Math.round(v)` is `0` while `Math.floor(v + 0.5)` is `1`, because the addition itself rounds up to `1.0`. The spec means the `floor` form.
+
+**Intermediate arithmetic is `double`**, on both sides, even though the wire values and the game's floats are 32-bit. A JavaScript client has no float32 arithmetic at all, so double intermediates are the only way the two implementations land on the same integer at a rounding boundary; widening a `float` to `double` is exact, so nothing is lost. Golden vectors are derived the same way — never with float32 intermediates.
+
+**World bounds must satisfy `max(|WorldOriginX|, |WorldOriginY|, |origin + WorldSize|) < 128 × WorldSize`.** Dequantized values are handed to the game as `float32`, whose relative error is 2⁻²⁴; requantizing stays on the same integer only while `M × 2⁻²⁴ × 65535 / WorldSize < ½`, i.e. `M < 128 × WorldSize`. Outside that ratio the round-trip fixed point below silently stops holding. The default world (`−2048, −2048, 4096`) has a 256× margin; a room is refused at creation if its bounds do not.
+
+Non-finite input (`NaN`, `±∞`) is never quantized: it is rejected at the edge and counted (`nan`). In-range clamping is silent; that is what the `clamp` in the table means.
 
 **The normative quantize-on-both-sides rule.** The quantized integers *are* the replicated values:
 
@@ -168,30 +183,34 @@ Velocity stays in the format and in the mask vocabulary but is **off the wire by
 
 ### `FullRecord` — 20 bytes, fixed
 
-```
-u32 NetId
-u16 Kind
-u32 OwnerId
-u16 QX, u16 QY
-u8  QRot
-i16 QVx, i16 QVy
-u8  Flags
-```
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | `u32 NetId` |
+| 4 | 2 | `u16 Kind` |
+| 6 | 4 | `u32 OwnerId` |
+| 10 | 2 | `u16 QX` |
+| 12 | 2 | `u16 QY` |
+| 14 | 1 | `u8 QRot` |
+| 15 | 2 | `i16 QVx` |
+| 17 | 2 | `i16 QVy` |
+| 19 | 1 | `u8 Flags` |
 
 ### `UpdateRecord` (S→C) — 3…13 bytes
 
 ```
-u16 Slot
-u8  Mask
-(u16 QX)(u16 QY)(u8 QRot)(i16 QVx)(i16 QVy)(u8 Flags)   — present per Mask, in bit order
+0  u16 Slot
+2  u8  Mask
+3  (u16 QX)(u16 QY)(u8 QRot)(i16 QVx)(i16 QVy)(u8 Flags)   — present per Mask, in bit order
 ```
+
+Masked field sizes: X 2, Y 2, Rot 1, Vx 2, Vy 2, Flags 1; `ColdDirty` and `Teleport` contribute none. Maximum: 3 + 10 = 13 B.
 
 ### `OwnerUpdateRecord` (C→S) — 5…15 bytes
 
 ```
-u32 NetId
-u8  Mask
-(u16 QX)(u16 QY)(u8 QRot)(i16 QVx)(i16 QVy)(u8 Flags)   — present per Mask, in bit order
+0  u32 NetId
+4  u8  Mask
+5  (u16 QX)(u16 QY)(u8 QRot)(i16 QVx)(i16 QVy)(u8 Flags)   — present per Mask, in bit order
 ```
 
 Same fields as `UpdateRecord`, keyed by **`NetId`** rather than slot: the server needs the generation bits to reject a mutation aimed at a slot that has since been reused.
@@ -210,36 +229,46 @@ Removal record — **2 bytes**: `u16 Slot`.
 ### `SnapshotPacket` (68, S→C) — 10-byte header
 
 ```
-u8  TypeId = 68
-u16 Seq
-u32 ServerTick
-u8  FrameFlags        — bit 0 = Final; bits 1–7 reserved, sent 0
-u16 Count
-FullRecord × Count
+0  u8  TypeId = 68
+1  u16 Seq
+3  u32 ServerTick
+7  u8  FrameFlags     — bit 0 = Final; bits 1–7 reserved, sent 0
+8  u16 Count
+10 FullRecord × Count
 ```
 
 Sent right after `WelcomeEvent` (entities inside the joiner's AOI) and after a resync. A large snapshot is split across several frames, each self-contained; only the last carries `Final`. Without that bit a client had no way to know a multi-frame snapshot was complete.
 
-### `DeltaPacket` (69, S→C) — 13-byte header
+**A snapshot is always sent, even when it is empty.** Unlike a `DeltaPacket`, a `SnapshotPacket` with `Count = 0` and `Final` set is emitted for a joiner who can currently see nothing — otherwise a client that joined an empty corner of the world would wait forever for a completion it is never told about.
+
+### `DeltaPacket` (69, S→C) — 7-byte header, 13 bytes of fixed overhead
 
 ```
-u8  TypeId = 69
-u16 Seq
-u32 ServerTick
-u16 RemovedCount ; u16 Slot       × RemovedCount   — despawned OR left AOI
-u16 EnterCount   ; FullRecord     × EnterCount     — entered AOI
-u16 UpdateCount  ; UpdateRecord   × UpdateCount    — already-known entities that changed
+0  u8  TypeId = 69
+1  u16 Seq
+3  u32 ServerTick
+7  u16 RemovedCount ; u16 Slot       × RemovedCount   — despawned OR left AOI
+   u16 EnterCount   ; FullRecord     × EnterCount     — entered AOI
+   u16 UpdateCount  ; UpdateRecord   × UpdateCount    — already-known entities that changed
 ```
+
+Sections are **interleaved** (count, then its records, then the next count), so only the first count sits at a fixed offset. All three counts are always present, even when zero — hence 7 + 3 × 2 = **13 bytes** of fixed overhead, which is the header cost in the budget figures above.
 
 A tick with nothing for a given client produces **no frame at all**.
+
+**A truncated section is not a lost change.** When the byte budget cuts a section short, the server owes that client the remainder:
+
+- **Removals** keep their known-set bit, so the exit is re-detected next tick.
+- **Enters** stay un-known and are retried from a per-client carry cursor, so the same low slots do not win every tick.
+- **Updates** are remembered per client and re-sent from *current* state on a later tick. This one is load-bearing: an entity that moves once and then stops would otherwise leave a client that got truncated on exactly that tick with a permanently stale position — a dropped absolute value only self-heals if the entity keeps changing.
 
 ### `EntityUpdatePacket` (67, C→S)
 
 ```
-u8  TypeId = 67
-u32 ClientTick
-u8  Count
-OwnerUpdateRecord × Count
+0  u8  TypeId = 67
+1  u32 ClientTick
+5  u8  Count
+6  OwnerUpdateRecord × Count
 ```
 
 Server rules: every `NetId` must be owned by the sender (else the record is dropped and the `ownership` counter increments), `Count` is quota-capped, every quantized field is range-checked, and the server stamps its own tick — the client tick is advisory only (telemetry and ordering).
@@ -247,19 +276,27 @@ Server rules: every `NetId` must be owned by the sender (else the record is drop
 ### `SignalBatchPacket` (130, S→C) — 8-byte header
 
 ```
-u8  TypeId = 130
-u16 Seq
-u32 ServerTick
-u8  Count
-Entry × Count:
-    u32 SenderClientId
-    u8  NameLength                 — 1…64
-    u8[NameLength] Name            — UTF-8
-    u8  PayloadLength              — 0…255
-    u8[PayloadLength] Payload
+0  u8  TypeId = 130
+1  u16 Seq
+3  u32 ServerTick
+7  u8  Count
+8  Entry × Count:
+       +0 u32 SenderClientId
+       +4 u8  NameLength           — 1…64
+       +5 u8[NameLength] Name      — UTF-8
+          u8  PayloadLength        — 0…255
+          u8[PayloadLength] Payload
 ```
 
+One entry is `6 + NameLength + PayloadLength` bytes.
+
 One packet per client per tick, flushed with that client's delta. A signal whose payload exceeds 255 bytes is not eligible for the hot path and is refused with the `quota` counter — batched signals are small game events, not a data channel.
+
+Scoping rules, which are what keep this from becoming an amplifier:
+
+- An entry reaches a client only when the **sender's own focus entity is in that client's visible set**, and never reaches the sender itself (the emitter already simulated its own event locally).
+- A sender with **no bound focus entity cannot scope a signal to an AOI at all**: the emit is refused and counted. There is deliberately no "send to everyone" fallback — that would turn one client's emit into 600 sends.
+- A batch that does not fit its byte budget **drops** the surplus entries and counts them. Signals are events: delivering one a tick late is worse than not delivering it, so they are never carried like entity updates are.
 
 ## Sequencing and recovery
 
@@ -279,15 +316,19 @@ An AOI *radius* does not bound worst-case egress: 600 players stacked on one poi
 
 | Cap | Default | Meaning |
 |---|---|---|
-| `MaxVisibleEntities` | 64 | Per client, **k-nearest by squared distance**. Entities beyond the cap are simply not replicated to that client this tick. |
-| `MaxEntersPerTick` | 24 | New full records per client per tick, with a **carry cursor** so the remainder arrives on following ticks instead of being lost. |
+| `MaxVisibleEntities` | 64 | Per client, **k-nearest by squared distance**, applied to the *exit* radius set — so it bounds what a client **retains**, not merely what it may enter. Capping only the enter radius would let a known set creep up to the whole outer population, since an exit is "known and outside the exit radius". Restricting the nearest-k of the outer set to the enter radius *is* the nearest-k of the inner set, so enter semantics are unaffected. |
+| `MaxEntersPerTick` | 24 | New full records per client per tick **in a `DeltaPacket`**, with a **carry cursor** so the remainder arrives on following ticks instead of being lost. Snapshots are bounded by bytes only — a resync must be able to ship its ~40 records without being throttled into uselessness. |
 | `MaxBytesPerClientPerTick` | 1100 | One MSS, and one future QUIC datagram. Assembly emits what fits and carries the rest. |
 
 Expected steady state: ~30 moving entities × 8 B + 13 B header ≈ 280 B/tick with framing → **45 kbit/s per client, ~27 Mbit/s per room**. Absolute worst case with the caps biting: 176 kbit/s per client, 105 Mbit/s per room.
 
 **AOI hysteresis**: an entity **enters** at `AoiRadius` and **exits** only beyond `1.25 × AoiRadius`. At 600 players the arena edge is all boundary, and a flapping pair costs ~22 B/tick each.
 
-**AOI focus comes from server state, not from a client claim.** A subscriber's focus is bound to one of its owned entities' *server-side* position, refreshed every tick. Free-position focus exists only for spectators and is speed-clamped, incrementing `focusClamp` when it bites. This deletes the "teleport my focus every tick to force enormous enter sets and amplify to N peers" exploit at its source; the enter cap bounds whatever remains.
+**AOI focus comes from server state, not from a client claim.** A subscriber's focus is bound to one of its owned entities' *server-side* position, refreshed every tick.
+
+Which entity: **the client's first live owned entity, in spawn order.** When it despawns the focus re-binds to the next one, and a client owning nothing is a spectator. This costs zero wire bytes and needs no new message — and because unknown TypeIds are ignored rather than fatal, an explicit "this entity is my camera" command can be added later without a version bump.
+
+**Free spectator focus has a server seam but no wire message yet.** v2 defines no command carrying free coordinates, so a spectator's AOI stays where its last owned entity was. The clamped free-focus path exists server-side and is the reason the `focusClamp` counter is defined; the command that drives it lands with the spectator feature, version-tolerantly. Free-position focus exists only for spectators and is speed-clamped, incrementing `focusClamp` when it bites. This deletes the "teleport my focus every tick to force enormous enter sets and amplify to N peers" exploit at its source; the enter cap bounds whatever remains.
 
 ## Authority and ownership
 
@@ -309,7 +350,8 @@ Within a **30-second grace** after a socket drops:
 
 - the client keeps its `ClientId` and its entities, which **freeze in place**;
 - `PeerLeftEvent` is deferred — peers are not told about a blip;
-- a successful resume answers with `WelcomeEvent{Resumed = true}` followed by a fresh snapshot (the known set is rebuilt from scratch, never assumed);
+- a successful resume answers with `WelcomeEvent{Resumed = true}`, the **full** `RoomVarsChangedEvent` set (vars may have changed during the blip, and a resumed client must not reset its local state to find out) and a fresh snapshot — the known set is rebuilt from scratch, never assumed. Peers see no `PeerJoinedEvent`: from their side the member never left;
+- the host role **stays with an absent host** for the duration of its grace. Migrating for a blip would announce exactly what the grace exists to hide;
 - a **failed** resume silently degrades to a fresh join. No new error paths: a stale, wrong or expired key is simply not a resume.
 
 After the grace expires the member leaves with `LeaveReason.Timeout` and its entities are resolved by ownership policy.
@@ -327,14 +369,14 @@ Every inbound value is validated before it can touch room state. These are not d
 
 | Check | Rule | Counter |
 |---|---|---|
-| Finiteness | every inbound float must be finite — **one NaN poisons the spatial hash** | `nan` |
-| Bounds | positions clamped to the world AABB | `nan` |
-| Quantized range | every quantized field range-checked before dequantization | `mask` |
-| Ownership | every entity mutation must come from its owner | `ownership` |
+| Finiteness | every inbound float must be finite — **one NaN poisons the spatial hash**. After quantization the only inbound floats left on the entity path are spectator focus coordinates, so this is where the check lives; there is nothing left to validate on spawn or update | `nan` |
+| Bounds | out-of-world positions are clamped, silently, by quantization itself | — |
 | Mask legality | client masks limited to `0x3F \| 0x80` | `mask` |
+| Record integrity | a truncated record, an illegal `NameLength`, or a `NetId` whose generation no longer matches its slot — note that a `u16 QX`/`u8 QRot`/`i16 QVx` is a **valid** quantized value by construction, so there is no quantized-range check to write | `mask` |
+| Ownership | every entity mutation must come from its owner | `ownership` |
 | Kind | a per-room **allowlist** of entity kinds; an unknown `kind` would fault every observer's scene code | `kind` |
-| Speed | `\|Δpos\| ≤ maxSpeed × Δt × 1.25` — **counted, not enforced**, at Level 1 | `speed` |
-| Focus | spectator focus movement speed-clamped | `focusClamp` |
+| Speed | `\|Δpos\| ≤ MaxEntitySpeed × Δt × 1.25` — **counted, not enforced**, at Level 1. `Δt` is the real elapsed ticks since that entity's last check, capped at 64 ticks so a long-idle entity cannot bank an unlimited teleport allowance | `speed` |
+| Focus | spectator focus *movement* clamped to `MaxSpectatorFocusSpeed`. The first placement after a join is not clamped — clamping it against an initial `(0,0)` would strand a joining spectator at the world origin | `focusClamp` |
 | Teleport bit | legitimate under client authority (respawns); quotaed now, stripped at Level 2 | `teleport` |
 | Quotas | see below | `quota` |
 
@@ -393,6 +435,9 @@ Violations increment **per-client counters** (`ownership, speed, mask, nan, kind
 | 16 | `NotEntityOwner` | — (spawn/despawn response only) |
 | 17 | `InternalError` | 4000 |
 | 18 | `KindNotAllowed` | — (spawn response only) |
+| 19 | `SendQueueOverflow` | 4004 |
+
+`SendQueueOverflow` is deliberately not `RateLimited`: that one means the client sent too much, this one means it read too little. A hot-lane overflow is recoverable (roll back, resync); only a **control**-lane overflow closes the session, because control frames may never be dropped silently.
 
 ## Leave reasons (`LeaveReason : byte`)
 

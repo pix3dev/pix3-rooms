@@ -12,7 +12,9 @@ namespace Pix3.Rooms.Server.Rooms;
 /// <list type="bullet">
 ///   <item><description>
 ///   A numeric field left at 0 or negative (<c>MaxPlayers</c>, <c>TickHz</c>, <c>AoiRadius</c>,
-///   <c>MaxEntities</c>) means "unspecified" and takes the value from <see cref="RoomDefaultsOptions"/>.
+///   <c>MaxEntities</c>, <c>MaxVisibleEntities</c>, <c>WorldSize</c>) means "unspecified" and takes the
+///   value from <see cref="RoomDefaultsOptions"/>. An unspecified <c>WorldSize</c> takes the default
+///   origins with it: half a world is not a world.
 ///   </description></item>
 ///   <item><description>
 ///   <c>IdleTtlSeconds</c> below 0 takes the default; exactly 0 is honoured and means "reap as soon as
@@ -20,6 +22,8 @@ namespace Pix3.Rooms.Server.Rooms;
 ///   </description></item>
 ///   <item><description><c>BuildId</c> is sanitised: control characters stripped, capped at
 ///   <see cref="MaxBuildIdLength"/>. It is a cosmetic tag, so losing characters cannot break a room.</description></item>
+///   <item><description><c>AllowedKinds</c> is de-duplicated in place: it denotes a set, so collapsing
+///   repeats changes nothing a caller could observe.</description></item>
 /// </list>
 /// <para><b>Rejected</b> (silently changing these would surprise the caller and misprice the room):</para>
 /// <list type="bullet">
@@ -27,9 +31,15 @@ namespace Pix3.Rooms.Server.Rooms;
 ///   characters outside <c>[A-Za-z0-9._:-]</c> — those ids end up in URLs, log scopes and metric
 ///   labels.</description></item>
 ///   <item><description>A positive but out-of-range <c>MaxPlayers</c>, <c>TickHz</c>,
-///   <c>MaxEntities</c>, <c>AoiRadius</c> or <c>IdleTtlSeconds</c>. Someone asking for 1000 Hz wants an
-///   error, not a room quietly running at 120 Hz.</description></item>
+///   <c>MaxEntities</c>, <c>MaxVisibleEntities</c>, <c>AoiRadius</c> or <c>IdleTtlSeconds</c>. Someone
+///   asking for 1000 Hz wants an error, not a room quietly running at 120 Hz.</description></item>
 ///   <item><description>A non-finite <c>AoiRadius</c> (NaN/±∞), which would poison the spatial hash.</description></item>
+///   <item><description>World bounds that fail <see cref="WorldQuantizer.IsValidWorld"/> — non-finite, a
+///   degenerate size, or a coordinate magnitude beyond
+///   <see cref="WorldQuantizer.MaxCoordinateToSizeRatio"/> × size, where float32 round-tripping stops
+///   being a fixed point and every position oscillates by a quantum <i>forever</i>. Clamping a world is
+///   never right: it would silently move every entity in the game.</description></item>
+///   <item><description>An <c>AllowedKinds</c> list longer than <see cref="MaxAllowedKinds"/>.</description></item>
 ///   <item><description><see cref="RoomMode.Authoritative"/>: this build only implements Relay
 ///   (Level 1). Silently degrading to Relay would hand the game a server that does not simulate.</description></item>
 /// </list>
@@ -60,8 +70,20 @@ public static class RoomConfigValidator
     /// <summary>A room must be able to hold at least one entity.</summary>
     public const int MinMaxEntities = 1;
 
-    /// <summary>Entity-table ceiling: the <c>netId</c> slot field is 20 bits wide.</summary>
+    /// <summary>
+    /// Entity-table ceiling: server→client records address entities by <c>u16 Slot</c>, so the table can
+    /// never exceed the 16-bit slot space of the 16/16 <see cref="NetId"/> split.
+    /// </summary>
     public const int MaxMaxEntities = NetId.MaxSlot;
+
+    /// <summary>A client must be allowed to see at least one entity.</summary>
+    public const int MinMaxVisibleEntities = 1;
+
+    /// <summary>
+    /// Visibility ceiling. <c>WelcomeEvent.MaxVisibleEntities</c> is a <c>u16</c> and a known set is
+    /// bounded by the slot space anyway, so the two limits coincide.
+    /// </summary>
+    public const int MaxMaxVisibleEntities = NetId.MaxSlot;
 
     /// <summary>Smallest usable area-of-interest radius.</summary>
     public const float MinAoiRadius = 1f;
@@ -71,6 +93,12 @@ public static class RoomConfigValidator
 
     /// <summary>Longest idle TTL: a day.</summary>
     public const int MaxIdleTtlSeconds = 86_400;
+
+    /// <summary>
+    /// Longest entity-kind allowlist. A prefab table larger than this is not an allowlist any more, and
+    /// the whole point of the list is that a room states exactly what its build can instantiate.
+    /// </summary>
+    public const int MaxAllowedKinds = 1024;
 
     /// <summary>
     /// Validates and normalizes <paramref name="requested"/>.
@@ -97,6 +125,8 @@ public static class RoomConfigValidator
             error = "room config is required";
             return false;
         }
+
+        ArgumentNullException.ThrowIfNull(defaults);
 
         string roomId = requested.RoomId;
         if (!IsWellFormedId(roomId, MaxRoomIdLength))
@@ -139,6 +169,14 @@ public static class RoomConfigValidator
             return false;
         }
 
+        int maxVisibleEntities = requested.MaxVisibleEntities <= 0
+            ? defaults.MaxVisibleEntities
+            : requested.MaxVisibleEntities;
+        if (!TryRange(maxVisibleEntities, MinMaxVisibleEntities, MaxMaxVisibleEntities, "maxVisibleEntities", ref reject, ref error))
+        {
+            return false;
+        }
+
         float aoiRadius = requested.AoiRadius;
         if (float.IsNaN(aoiRadius) || float.IsInfinity(aoiRadius))
         {
@@ -167,10 +205,23 @@ public static class RoomConfigValidator
             return false;
         }
 
+        if (!TryResolveWorld(requested, defaults, out float worldOriginX, out float worldOriginY, out float worldSize, out error))
+        {
+            reject = RejectCode.BadRequest;
+            return false;
+        }
+
+        if (!TryResolveAllowedKinds(requested.AllowedKinds, out ushort[] allowedKinds, out error))
+        {
+            reject = RejectCode.BadRequest;
+            return false;
+        }
+
         // Defaults themselves can be misconfigured; a bad default must not create an unrunnable room.
         maxPlayers = Math.Clamp(maxPlayers, MinMaxPlayers, MaxMaxPlayers);
         tickHz = Math.Clamp(tickHz, MinTickHz, MaxTickHz);
         maxEntities = Math.Clamp(maxEntities, MinMaxEntities, MaxMaxEntities);
+        maxVisibleEntities = Math.Clamp(maxVisibleEntities, MinMaxVisibleEntities, MaxMaxVisibleEntities);
         aoiRadius = Math.Clamp(aoiRadius, MinAoiRadius, MaxAoiRadius);
         idleTtl = Math.Clamp(idleTtl, 0, MaxIdleTtlSeconds);
 
@@ -185,6 +236,11 @@ public static class RoomConfigValidator
             IdleTtlSeconds = idleTtl,
             MaxEntities = maxEntities,
             Mode = RoomMode.Relay,
+            MaxVisibleEntities = maxVisibleEntities,
+            WorldOriginX = worldOriginX,
+            WorldOriginY = worldOriginY,
+            WorldSize = worldSize,
+            AllowedKinds = allowedKinds,
         };
         return true;
     }
@@ -213,6 +269,90 @@ public static class RoomConfigValidator
             }
         }
 
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves the room's world bounds and refuses anything the quantizer could not round-trip.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="WorldQuantizer.IsValidWorld"/> is the authority, precision ratio included: outside it
+    /// the encode→decode→encode fixed point silently stops holding, so the failure mode is not a bad
+    /// number but an entire room whose entities jitter by a quantum and never settle.
+    /// </remarks>
+    private static bool TryResolveWorld(
+        RoomConfig requested,
+        RoomDefaultsOptions defaults,
+        out float originX,
+        out float originY,
+        out float size,
+        out string? error)
+    {
+        originX = requested.WorldOriginX;
+        originY = requested.WorldOriginY;
+        size = requested.WorldSize;
+        error = null;
+
+        if (!float.IsFinite(originX) || !float.IsFinite(originY) || !float.IsFinite(size))
+        {
+            error = "worldOriginX, worldOriginY and worldSize must all be finite numbers";
+            return false;
+        }
+
+        if (size <= 0f)
+        {
+            // No size means no world was specified, so the origins come from the defaults too — mixing a
+            // caller's origin with a default size is how you get a world nobody asked for.
+            originX = defaults.WorldOriginX;
+            originY = defaults.WorldOriginY;
+            size = defaults.WorldSize;
+        }
+
+        if (!WorldQuantizer.IsValidWorld(originX, originY, size))
+        {
+            error = $"world bounds ({originX}, {originY}, size {size}) are unusable: all three must be finite, "
+                  + $"size at least {WorldQuantizer.MinWorldSize}, and every coordinate magnitude below "
+                  + $"{WorldQuantizer.MaxCoordinateToSizeRatio} × size — beyond that ratio float32 round-tripping "
+                  + "stops being a fixed point and positions oscillate by a quantum forever";
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Copies the allowlist into an immutable array, collapsing duplicates.</summary>
+    private static bool TryResolveAllowedKinds(
+        IReadOnlyList<ushort>? requested,
+        out ushort[] kinds,
+        out string? error)
+    {
+        error = null;
+
+        if (requested is null || requested.Count == 0)
+        {
+            kinds = [];
+            return true;
+        }
+
+        if (requested.Count > MaxAllowedKinds)
+        {
+            kinds = [];
+            error = $"allowedKinds must hold at most {MaxAllowedKinds} entries";
+            return false;
+        }
+
+        var seen = new HashSet<ushort>(requested.Count);
+        var accepted = new List<ushort>(requested.Count);
+        for (int i = 0; i < requested.Count; i++)
+        {
+            ushort kind = requested[i];
+            if (seen.Add(kind))
+            {
+                accepted.Add(kind);
+            }
+        }
+
+        kinds = accepted.ToArray();
         return true;
     }
 

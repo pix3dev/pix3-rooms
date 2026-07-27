@@ -1,16 +1,20 @@
 namespace Pix3.Rooms.Protocol;
 
 /// <summary>
-/// Why a request, a join or a session was refused. Travels as <see cref="RejectEvent.Code"/>
-/// and as <see cref="EntitySpawnAckEvent.RejectCode"/>. Every close whose reason is known is
-/// preceded by a <see cref="RejectEvent"/> so the client can show a real message.
+/// Why a request, a join or a session was refused. Travels as <see cref="RejectedEvent.Code"/>
+/// and as <see cref="SpawnEntityResponse.RejectCode"/>. Every close whose reason is known is
+/// preceded by a <see cref="RejectedEvent"/> so the client can show a real message.
 /// </summary>
 public enum RejectCode : ushort
 {
-    /// <summary>No error. Never sent as a rejection; used as the "ok" value in acks.</summary>
+    /// <summary>No error. Never sent as a rejection; used as the "ok" value in responses.</summary>
     None = 0,
 
-    /// <summary><see cref="HelloRequest.ProtocolVersion"/> is not <see cref="ProtocolVersion.Current"/>. Close 4001.</summary>
+    /// <summary>
+    /// <see cref="HelloCommand.ProtocolVersion"/> is below <see cref="ProtocolVersion.MinSupported"/>.
+    /// Negotiation is by range, so a version <i>above</i> <see cref="ProtocolVersion.Current"/> is fine
+    /// and never lands here. Close 4001.
+    /// </summary>
     ProtocolVersionMismatch = 1,
 
     /// <summary>Room token missing, malformed or signature invalid. Close 4002.</summary>
@@ -52,12 +56,34 @@ public enum RejectCode : ushort
     /// <summary>The same identity reconnected and displaced this session. Close 4008.</summary>
     SessionReplaced = 14,
 
-    /// <summary>Room already holds <c>MaxEntities</c>. Spawn-ack only — never a close reason.</summary>
+    /// <summary>Room already holds <c>MaxEntities</c>. Spawn response only — never a close reason.</summary>
     EntityLimitReached = 15,
 
-    /// <summary>Caller does not own the entity it tried to mutate or despawn. Ack only — never a close reason.</summary>
+    /// <summary>
+    /// Caller does not own the entity it tried to mutate or despawn. Spawn/despawn response only —
+    /// never a close reason.
+    /// </summary>
     NotEntityOwner = 16,
 
     /// <summary>Unexpected server-side failure. Close 4000.</summary>
     InternalError = 17,
+
+    /// <summary>
+    /// The requested <c>Kind</c> is not on the room's allowlist. An unknown kind would fault every
+    /// observer's scene code, so it is refused at the spawn rather than replicated. Spawn response only
+    /// — never a close reason.
+    /// </summary>
+    KindNotAllowed = 18,
+
+    /// <summary>
+    /// The connection's control send queue overflowed: this client could not drain what the room owed it,
+    /// so the session is unrecoverably behind. Close 4004.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately distinct from <see cref="RateLimited"/>, which is the opposite fault — that one means
+    /// the client sent too much, this one means it read too little. Collapsing them would make the
+    /// telemetry lie about which side of the socket is in trouble, and would show the player a message
+    /// blaming them for flooding when their connection is simply too slow.
+    /// </remarks>
+    SendQueueOverflow = 19,
 }

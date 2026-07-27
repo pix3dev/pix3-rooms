@@ -25,7 +25,15 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
     /// <summary>How often deadlines are checked.</summary>
     public const int SweepIntervalMilliseconds = 1_000;
 
-    private readonly ConcurrentDictionary<uint, ClientConnection> _connections = new();
+    /// <summary>
+    /// Live connections, keyed by <see cref="ClientConnection.SessionId"/>.
+    /// </summary>
+    /// <remarks>
+    /// Keyed on the session id, <b>not</b> the client id: a client id does not exist until the handshake
+    /// authenticates, and the sockets that most need supervising are precisely the ones that have not got
+    /// there yet — the handshake deadline is what removes them.
+    /// </remarks>
+    private readonly ConcurrentDictionary<long, ClientConnection> _connections = new();
     private readonly NetOptions _options;
     private readonly IpConnectionLimiter _ipLimiter;
     private readonly NetMetrics _metrics;
@@ -105,15 +113,16 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
     public void Register(ClientConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        if (_connections.TryAdd(connection.ClientId, connection))
+        if (_connections.TryAdd(connection.SessionId, connection))
         {
             _metrics.OnConnectionOpened();
             return;
         }
 
-        // Client ids come from a monotonic counter, so this can only mean a 2^32 wraparound collided
-        // with a session that has been open for four billion connections. Refuse rather than lose one.
-        _logger.LogError("Client id {ClientId} is already registered; closing the new session", connection.ClientId);
+        // Session ids come from a 64-bit monotonic counter, so a collision is not reachable in practice.
+        // Refusing rather than replacing keeps the impossible case from silently dropping a live socket out
+        // of the deadline sweep.
+        _logger.LogError("Session id {SessionId} is already registered; closing the new session", connection.SessionId);
         connection.RequestClose(RejectCode.SessionReplaced, "this session id is already in use");
     }
 
@@ -121,7 +130,7 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
     public void Unregister(ClientConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        if (_connections.TryRemove(connection.ClientId, out _))
+        if (_connections.TryRemove(connection.SessionId, out _))
         {
             _metrics.OnConnectionClosed();
         }
@@ -153,7 +162,7 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
         ArgumentNullException.ThrowIfNull(reason);
 
         int closed = 0;
-        foreach (KeyValuePair<uint, ClientConnection> pair in _connections)
+        foreach (KeyValuePair<long, ClientConnection> pair in _connections)
         {
             try
             {
@@ -162,7 +171,7 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to close client {ClientId} during shutdown", pair.Key);
+                _logger.LogError(ex, "Failed to close session {SessionId} during shutdown", pair.Key);
             }
         }
 
@@ -241,7 +250,7 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
             {
                 long now = Stopwatch.GetTimestamp();
 
-                foreach (KeyValuePair<uint, ClientConnection> pair in _connections)
+                foreach (KeyValuePair<long, ClientConnection> pair in _connections)
                 {
                     try
                     {
@@ -249,7 +258,7 @@ public sealed class ConnectionSupervisor : IHostedService, IAsyncDisposable
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex, "Deadline check for client {ClientId} threw", pair.Key);
+                        _logger.LogError(ex, "Deadline check for session {SessionId} threw", pair.Key);
                     }
                 }
 
