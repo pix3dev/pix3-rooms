@@ -19,18 +19,21 @@ RUN dotnet publish src/Pix3.Rooms.Server/Pix3.Rooms.Server.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# Server GC with a container-aware heap; rooms are CPU-bound on the tick path.
+# Server GC (also set in runtimeconfig via Directory.Build.props). The heap limit is left to the
+# container memory limit, which .NET reads by itself: GCHeapHardLimitPercent is on the rejected
+# list in docs/architecture.md.
 ENV DOTNET_gcServer=1 \
-    DOTNET_GCHeapHardLimitPercent=50 \
     ASPNETCORE_URLS=http://+:8080 \
     ASPNETCORE_ENVIRONMENT=Production
 
+# curl is only here for HEALTHCHECK. The non-root user is NOT created by hand: the .NET base
+# images already ship one (`app`, UID in $APP_UID) and the Ubuntu rootfs they use has no
+# `adduser`, so rolling our own fails at build time.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
- && rm -rf /var/lib/apt/lists/* \
- && adduser --system --uid 1001 --group rooms
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/publish ./
-USER 1001
+USER $APP_UID
 
 EXPOSE 8080
 

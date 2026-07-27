@@ -1,0 +1,65 @@
+; Install as /etc/systemd/system/pix3-rooms.service (a SYSTEM unit, not a --user one: the
+; resource budget and LimitNOFILE below are the point, and delegating those to a user slice is
+; needlessly fragile). See README -> Deploy for the one-time host preparation.
+
+[Unit]
+Description=Pix3 Rooms - Room Fabric (WebSocket game rooms)
+Documentation=https://github.com/gritsenko/pix3-rooms
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=pix3rooms
+Group=pix3rooms
+WorkingDirectory=/opt/pix3-rooms/current
+ExecStart=/opt/pix3-rooms/current/Pix3.Rooms.Server
+EnvironmentFile=/opt/pix3-rooms/shared/rooms.env
+
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+; Rooms:Server:ShutdownTimeoutSeconds is 5; leave room for the drain plus socket close.
+TimeoutStopSec=20
+
+; One fd per socket. 4096 connections against the default 1024 limit is not a subtle failure:
+; accept() starts returning EMFILE mid-match.
+LimitNOFILE=65535
+TasksMax=4096
+
+; The cgroup budget. MemoryMax also gives .NET its heap hard limit (75% of the cgroup limit)
+; without the GCHeapHardLimitPercent knob that docs/architecture.md rejects.
+;
+; Weight, not quota, because production today is a SHARED single-core host (it also serves
+; cloud.pix3.dev). A quota is a ceiling and this process wants the whole core when a room is
+; busy; what it actually needs is to win the core against nginx and the Node collab server,
+; which is what a weight buys. Under no contention a weight costs nothing.
+; On a dedicated multi-core host, add a ceiling instead:  CPUQuota=400%
+;
+; 1G, not the compose file's 2G: the box has 3.9 GB and neighbours, and a room sized for this
+; host (<=20 players) never approaches it. Raise it with the player budget, not before.
+CPUWeight=800
+MemoryMax=1G
+
+; The server writes no files at all (no database, no logs on disk - it logs to journald), so it
+; runs with nothing writable outside its private /tmp.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

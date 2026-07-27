@@ -1,0 +1,27 @@
+<Project>
+
+  <!-- Hot-path server settings: Server GC + concurrent, DATAS off.
+
+       These live in a .targets file, NOT in Directory.Build.props, on purpose. Props are imported
+       before the SDK, where $(OutputType) is still empty, so the same PropertyGroup conditioned on
+       'Exe' in Directory.Build.props evaluates to false and silently does nothing — the published
+       runtimeconfig.json then carries Server GC (an ASP.NET Core SDK default) with DATAS still ON,
+       which is precisely the configuration docs/architecture.md rules out. Targets are imported
+       after the SDK, so the condition here sees a real OutputType.
+
+       DATAS ships ENABLED by default with Server GC since .NET 9. It starts at one heap and ramps
+       reactively, scheduling full compacting GCs as it adapts — measured 1.16-1.69x regressions on
+       latency-sensitive workloads (dotnet/runtime#109047). A fixed-tick game server wants stable
+       p99 over a small RSS, so it is switched off deliberately.
+
+       Test projects are excluded: xunit v3 makes them OutputType=Exe too, and the test host's GC
+       mode is nobody's contract. Verify with:
+         dotnet msbuild src/Pix3.Rooms.Server/Pix3.Rooms.Server.csproj -getProperty:GarbageCollectionAdaptationMode
+       and by grepping System.GC.DynamicAdaptationMode in the published runtimeconfig.json. -->
+  <PropertyGroup Condition="'$(OutputType)' == 'Exe' AND '$(IsTestProject)' != 'true'">
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <GarbageCollectionAdaptationMode>0</GarbageCollectionAdaptationMode>
+  </PropertyGroup>
+
+</Project>

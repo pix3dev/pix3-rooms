@@ -10,15 +10,8 @@
     <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
   </PropertyGroup>
 
-  <!-- Hot-path server settings: Server GC + concurrent.
-       DATAS ships ENABLED by default with Server GC since .NET 9. It starts at one heap and
-       ramps reactively, scheduling full compacting GCs as it adapts — measured 1.16-1.69x
-       regressions on latency-sensitive workloads (dotnet/runtime#109047). A fixed-tick game
-       server wants stable p99 over a small RSS, so it is switched off deliberately. -->
-  <PropertyGroup Condition="'$(OutputType)' == 'Exe'">
-    <ServerGarbageCollection>true</ServerGarbageCollection>
-    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
-    <GarbageCollectionAdaptationMode>0</GarbageCollectionAdaptationMode>
-  </PropertyGroup>
+  <!-- The GC settings that used to live here moved to Directory.Build.targets: $(OutputType) is
+       not yet set when props are imported, so their 'Exe' condition never matched. See the
+       comment there before touching them. -->
 
 </Project>

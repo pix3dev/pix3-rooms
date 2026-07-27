@@ -17,6 +17,13 @@ services:
       Rooms__Auth__Issuer: ${ROOMS_JWT_ISSUER:-pix3-cloud}
       Rooms__Auth__Audience: ${ROOMS_JWT_AUDIENCE:-pix3-rooms}
       Rooms__Auth__ServiceToken: ${ROOMS_SERVICE_TOKEN:?set ROOMS_SERVICE_TOKEN}
+      # Startup refuses an empty origin allowlist in Production. Arrays bind by index.
+      Rooms__Auth__AllowedOrigins__0: ${ROOMS_ALLOWED_ORIGIN:-https://editor.pix3.dev}
+      # ...and an empty kind allowlist. Indexes into the build's prefab table.
+      Rooms__Defaults__AllowedKinds__0: ${ROOMS_ALLOWED_KIND:-0}
+      # Mandatory behind nginx: without it every client is the proxy's address as far as the
+      # per-IP quotas are concerned, and the ninth player trips MaxConnectionsPerIp.
+      Rooms__Server__TrustForwardedHeaders: "true"
       Rooms__Server__MaxRooms: ${ROOMS_MAX_ROOMS:-64}
     expose:
       - "8080"
