@@ -467,3 +467,32 @@ Permanent regression properties:
 - **Transport**: the 101 response carries no `Sec-WebSocket-Extensions`.
 
 Run `dotnet build Pix3.Rooms.slnx` (zero warnings) and `dotnet test Pix3.Rooms.slnx` before declaring anything done. Performance claims need a `tools/Pix3.Rooms.LoadGen` run with numbers, not reasoning.
+
+### The load generator
+
+`tools/Pix3.Rooms.LoadGen` drives real v2 clients against a running server: it creates rooms through the admin API, joins N clients per room, gives each an avatar it publishes at `--send-hz`, holds for `--duration`, and prints what it measured on both sides — per-client egress and round-trip from the clients, tick body p50/p99 and **tick start jitter p99** from the admin API.
+
+`RoomClient` is the reference C# client and is shared with the end-to-end tests, so a load number can never come from a client that quietly disagrees with the protocol. Every client validates its own stream, and the run ends in a verdict: a `Seq` gap, a delta for a slot no full record introduced, a malformed frame or a socket that closed early makes the run an **invalid measurement** rather than a fast one (exit code 2).
+
+```bash
+dotnet run -c Release --project tools/Pix3.Rooms.LoadGen -- \
+  --service-token dev-service-token --rooms 1 --clients 600 --duration 30 --pattern dogpile
+```
+
+`--pattern orbit` is the realistic case (each client orbits its own centre, AOI keeps visible sets small); `dogpile` is the one the caps exist for (every client inside every other client's AOI); `drift` churns enters and exits. A local run needs `Rooms:Quotas:MaxConnectionsPerIp` and `Rooms:Server:MaxPreAuthConnectionsPerIp` raised, since every synthetic client shares 127.0.0.1 — `appsettings.Development.json` already does.
+
+### Measured baseline (2026-07-27)
+
+One **shared** 8-core Windows dev box: server and load generator on the same machine, so the server had roughly half of it. Numbers from a dedicated Linux host will differ, and the tick figures below are the ones most likely to improve there.
+
+| Run (600 clients, 20 Hz, 30 s) | per client | room egress | tick body p50 / p99 | overruns | faults |
+|---|---|---|---|---|---|
+| `orbit` | 64.9 kbit/s | 34.4 Mbit/s | 9.5 / 35.0 ms | 5 | 0 |
+| `dogpile` | 76.1 kbit/s | 46.3 Mbit/s | 17.3 / 92.8 ms | 11 | 0 |
+| `dogpile`, 300 clients | 64.0 kbit/s | 20.6 Mbit/s | 9.5 / 32.0 ms | 0 | 0 |
+
+What holds: the mean update record measured **8.0 B** (orbit) and 7.6 B (dogpile) — the figure the bandwidth budget is built on; every client's known set peaked at exactly **64**, the `MaxVisibleEntities` cap; both runs came in under the predicted worst case (176 kbit/s per client, 105 Mbit/s per room); and across 1.6 million delta frames there were **zero** `Seq` gaps, zero dropped frames, zero resyncs and zero violations. Correctness at 600 players is measured, not argued.
+
+What does not: **the tick budget is the binding constraint, not bandwidth.** A 20 Hz room has 50 ms per tick, and the 600-player dogpile spent p99 92.8 ms — 11 ticks in 30 s ran over budget (skipped, per the tick-loop contract, not queued). p50 scales roughly linearly with players (9.5 → 17.3 ms for 300 → 600) but p99 scales worse. Nobody may claim 600 players per room on the strength of these numbers until the same run is repeated with the generator on a separate host and the server on Linux.
+
+Tick **start** jitter p99 landed at 10–19 ms, consistent with Windows' 15.625 ms timer slice and this box's own scheduling noise rather than with the loop (the same box measures ~9.5 ms of jitter on an ideal empty loop). Production is Linux, where a sleep is ~1 ms accurate.

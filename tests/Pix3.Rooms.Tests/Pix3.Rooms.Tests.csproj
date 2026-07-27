@@ -21,6 +21,10 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Pix3.Rooms.Protocol\Pix3.Rooms.Protocol.csproj" />
     <ProjectReference Include="..\..\src\Pix3.Rooms.Server\Pix3.Rooms.Server.csproj" />
+    <!-- The load generator's RoomClient is the reference C# client: the end-to-end tests drive the same
+         code the load runs drive, so a load number can never come from a client that quietly disagrees
+         with the protocol. -->
+    <ProjectReference Include="..\..\tools\Pix3.Rooms.LoadGen\Pix3.Rooms.LoadGen.csproj" />
   </ItemGroup>
 
 </Project>

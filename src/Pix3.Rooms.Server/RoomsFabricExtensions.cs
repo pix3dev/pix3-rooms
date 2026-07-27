@@ -280,6 +280,62 @@ public static class RoomsFabricExtensions
     }
 
     /// <summary>
+    /// Transport keepalive. The protocol has no server-to-client ping, so a silent-but-alive peer is
+    /// detected by WebSocket control pings; the application idle timeout covers a peer that is alive but
+    /// not playing. The timeout is what turns the ping into a detector rather than a formality: without it
+    /// a dead mobile socket (radio gone, no FIN) stays "open" until TCP gives up, holding a connection slot
+    /// and a room seat.
+    /// </summary>
+    public static readonly TimeSpan WebSocketKeepAliveInterval = TimeSpan.FromSeconds(15);
+
+    /// <inheritdoc cref="WebSocketKeepAliveInterval"/>
+    public static readonly TimeSpan WebSocketKeepAliveTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Builds the request pipeline: WebSocket support with the hardened keepalive settings, the identity
+    /// root, <c>/ws</c>, and the health, metrics and admin endpoints.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This lives here rather than inline in <c>Program</c> so that the pipeline a test brings up is
+    /// literally the pipeline production runs. The transport-hardening assertions (no
+    /// <c>permessage-deflate</c> in the 101, HTTP/1.1 only) are only worth anything if the thing under
+    /// test is not a hand-rolled copy of the real composition.
+    /// </para>
+    /// <para>
+    /// <b>Compression is never enabled.</b> <c>permessage-deflate</c> costs 64–316 KiB of zlib context per
+    /// connection and its context takeover would break datagram portability, so the WebSocket options are
+    /// left without it and the endpoint accepts sockets without <c>DangerousEnableCompression</c>. That is
+    /// an absence, which is exactly why it needs a test.
+    /// </para>
+    /// </remarks>
+    /// <param name="app">The application being composed.</param>
+    /// <returns>The same application, for chaining.</returns>
+    public static WebApplication UseRoomsFabric(this WebApplication app)
+    {
+        ArgumentNullException.ThrowIfNull(app);
+
+        app.UseWebSockets(new WebSocketOptions
+        {
+            KeepAliveInterval = WebSocketKeepAliveInterval,
+            KeepAliveTimeout = WebSocketKeepAliveTimeout,
+        });
+
+        // Identity only: no capability, no configuration, nothing that helps an unauthenticated prober.
+        app.MapGet("/", () => Results.Text($"pix3-rooms {ServerRuntimeInfo.Version}\n", "text/plain; charset=utf-8"));
+
+        // Clients join with /ws?room=<id>. Mapped for every verb so a non-upgrade request reaches the
+        // endpoint's own 400 instead of a framework 405.
+        app.Map(RoomIdPolicy.WebSocketRoute, (HttpContext context, WebSocketEndpoint endpoint) => endpoint.HandleAsync(context));
+
+        app.MapHealthEndpoint();
+        app.MapMetricsEndpoint();
+        app.MapRoomAdminApi();
+
+        return app;
+    }
+
+    /// <summary>
     /// Counts the origin entries that would actually reach the allowlist. Blank entries are dropped by
     /// <see cref="ConfiguredOriginPolicy"/>, so a file containing only <c>[""]</c> is an empty allowlist
     /// and must be refused like one.

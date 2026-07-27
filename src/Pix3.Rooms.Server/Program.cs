@@ -7,13 +7,6 @@ using Pix3.Rooms.Server.Net;
 using Pix3.Rooms.Server.Observability;
 using Pix3.Rooms.Server.Rooms;
 
-// Transport keepalive. The protocol has no server-to-client ping, so a silent-but-alive peer is detected
-// by WebSocket control pings; the application idle timeout covers a peer that is alive but not playing.
-// The timeout is what turns the ping into a detector rather than a formality: without it a dead mobile
-// socket (radio gone, no FIN) stays "open" until TCP gives up, holding a connection slot and a room seat.
-TimeSpan keepAliveInterval = TimeSpan.FromSeconds(15);
-TimeSpan keepAliveTimeout = TimeSpan.FromSeconds(15);
-
 try
 {
     WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -21,22 +14,9 @@ try
 
     WebApplication app = builder.Build();
 
-    app.UseWebSockets(new WebSocketOptions
-    {
-        KeepAliveInterval = keepAliveInterval,
-        KeepAliveTimeout = keepAliveTimeout,
-    });
-
-    // Identity only: no capability, no configuration, nothing that helps an unauthenticated prober.
-    app.MapGet("/", () => Results.Text($"pix3-rooms {ServerRuntimeInfo.Version}\n", "text/plain; charset=utf-8"));
-
-    // Clients join with /ws?room=<id>. Mapped for every verb so a non-upgrade request reaches the
-    // endpoint's own 400 instead of a framework 405.
-    app.Map(RoomIdPolicy.WebSocketRoute, (HttpContext context, WebSocketEndpoint endpoint) => endpoint.HandleAsync(context));
-
-    app.MapHealthEndpoint();
-    app.MapMetricsEndpoint();
-    app.MapRoomAdminApi();
+    // The pipeline itself lives in the composition root so a test can bring up the real one rather than a
+    // hand-rolled copy — the transport-hardening assertions are worthless against a copy.
+    app.UseRoomsFabric();
 
     // Built eagerly, not on the first handshake: InsecureRoomTokenValidator logs its "tokens are NOT
     // verified" banner from its constructor, and JwtRoomTokenValidator rejects an unusable signing key
