@@ -403,6 +403,10 @@ Violations increment **per-client counters** (`ownership, speed, mask, nan, kind
 | Connections per IP | 8, plus 4 pre-authentication |
 | Teleport bits | 12/min (soft — counted) |
 
+A spawn refused by the **entities-per-owner** quota answers `SpawnEntityResponse{QuotaExceeded}`, not `EntityLimitReached`: the room's table still has slots, it is this owner's budget that ran out. `EntityLimitReached` means the room-wide `MaxEntities` is full, and the two are distinguishable on purpose — one is the client's fault and clears when it despawns something, the other is the room's and does not.
+
+Per-client violation counters are read through the admin API, which serves a snapshot the room's tick thread publishes at **~1 Hz**: replication state is single-threaded by contract, so an admin thread may never read it directly. A counter is therefore up to a second behind the packet that incremented it.
+
 ## `NetId`
 
 `netId` is an opaque `uint`: `slot | (generation << 16)` — **16 bits slot, 16 bits generation**.

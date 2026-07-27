@@ -54,6 +54,10 @@ public sealed class LiveServerFixture : IAsyncLifetime
             ["Rooms:Quotas:MaxConnectionsPerIp"] = "512",
             ["Rooms:Server:MaxPreAuthConnectionsPerIp"] = "512",
             ["Rooms:Server:MaxTotalConnections"] = "1024",
+
+            // Every test creates its own room and they all live for the fixture's lifetime; the
+            // development default of 16 would start refusing them part-way through the suite.
+            ["Rooms:Server:MaxRooms"] = "256",
             ["Rooms:Server:ResumeGraceSeconds"] = "30",
             ["Metrics:RequireServiceToken"] = "false",
 
