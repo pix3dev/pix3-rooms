@@ -81,7 +81,7 @@ They are not redundant: the image is what CI builds to prove the publish is whol
 Two settings are easy to miss and neither fails loudly:
 
 - **`Rooms__Server__TrustForwardedHeaders=true` is mandatory behind the proxy.** Every socket arrives from nginx, so without it the per-IP quotas see one address and the ninth player in a room is rejected by `MaxConnectionsPerIp`. Enable it *only* while nothing but nginx can reach the app port.
-- **`AllowedOrigins` and `Defaults:AllowedKinds` must be non-empty**, or startup refuses to run in Production. Arrays bind by index: `Rooms__Auth__AllowedOrigins__0=…`.
+- **`AllowedOrigins` and `Defaults:AllowedKinds` must be non-empty**, or startup refuses to run in Production. Arrays bind by index: `Rooms__Auth__AllowedOrigins__0=…`. The allowlist is not a secret, so the shipped `appsettings.Production.json` carries it (`editor.pix3.dev`, `cloud.pix3.dev`, and `http://localhost:8123` for an editor dev server pointed at the cloud); add origins **there**, because a `Rooms__Auth__AllowedOrigins__2` line in `rooms.env` shadows the third entry by index.
 
 ### systemd: one-time host preparation
 
