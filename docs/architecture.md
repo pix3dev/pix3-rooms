@@ -38,8 +38,8 @@ One folder = one owner. Do not create or edit files outside your folder; if you 
 | `src/Pix3.Rooms.Server/Auth/` | `Pix3.Rooms.Server.Auth` | Room-token (JWT) validation, service-token validation, origin policy, dev/insecure mode |
 | `src/Pix3.Rooms.Server/Rooms/` | `Pix3.Rooms.Server.Rooms` | Room, room manager/registry, per-room tick thread, TTL eviction, membership, resume grace, host migration, room-scoped fan-out, chat, room vars |
 | `src/Pix3.Rooms.Server/Replication/` | `Pix3.Rooms.Server.Replication` | Entity table (SoA, quantized), spatial hash AOI, per-subscriber known-sets + `Seq`, encode-once delta/snapshot/signal-batch assembly |
-| `src/Pix3.Rooms.Server/Admin/` | `Pix3.Rooms.Server.Admin` | Admin REST API for room lifecycle (service-token auth), violation counters, `/health` |
-| `src/Pix3.Rooms.Server/Observability/` | `Pix3.Rooms.Server.Observability` | Dependency-free metrics registry + Prometheus text endpoint |
+| `src/Pix3.Rooms.Server/Admin/` | `Pix3.Rooms.Server.Admin` | Admin REST API for room lifecycle (service-token auth), violation counters, `/health`, `/admin/stats` |
+| `src/Pix3.Rooms.Server/Observability/` | `Pix3.Rooms.Server.Observability` | Dependency-free metrics registry + Prometheus text endpoint, process/host resource sampler |
 | `src/Pix3.Rooms.Server/Program.cs`, `RoomsFabricExtensions.cs`, `MetricsBridge.cs`, `appsettings*.json` | `Pix3.Rooms.Server` | Composition root: options binding + validation, DI, endpoint wiring, metric pass-through |
 | `tests/Pix3.Rooms.Tests/` | `Pix3.Rooms.Tests` | xUnit: golden wire vectors, AOI, recovery, room lifecycle, quotas, auth |
 | `tools/Pix3.Rooms.LoadGen/` | `Pix3.Rooms.LoadGen` | Headless load generator: N bot clients against a room, latency/bandwidth/jitter report |

@@ -8,6 +8,20 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <WarningsAsErrors>nullable</WarningsAsErrors>
     <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+
+    <!-- The pix3 PLATFORM version, shared with the editor, @pix3/runtime and the cloud backend, so
+         "rooms 1.2.0" and "editor 1.2.0" mean the same release of one product. It is the single place
+         this repo declares a version: every project inherits it, /health and /admin/stats report it,
+         and cloud.pix3.dev's dashboard compares it against this property read straight from the
+         repository.
+
+         Two consequences worth knowing before touching it:
+         - This is a PRODUCT number, not an API-compatibility promise, and it is bumped by hand here
+           when the platform bumps (a sibling repo cannot be stamped by pix3's prebuild). A forgotten
+           bump shows up on the dashboard as rooms disagreeing with cloud.
+         - It has nothing to do with ProtocolVersion, which is the wire contract and moves only when
+           the bytes change. Never bump one because the other moved. -->
+    <Version>1.3.0</Version>
   </PropertyGroup>
 
   <!-- The GC settings that used to live here moved to Directory.Build.targets: $(OutputType) is

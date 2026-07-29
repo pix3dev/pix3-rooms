@@ -11,12 +11,22 @@ public static class ServerRuntimeInfo
 
     private static readonly DateTimeOffset ProcessStartedAt = ResolveProcessStart();
     private static readonly string ResolvedVersion = ResolveVersion();
+    private static readonly string ResolvedCommit = ResolveCommit();
 
     /// <summary>When this process started.</summary>
     public static DateTimeOffset StartedAt => ProcessStartedAt;
 
     /// <summary>Informational assembly version, without any build metadata suffix.</summary>
     public static string Version => ResolvedVersion;
+
+    /// <summary>
+    /// Git sha this binary was published from, or empty when neither source knows it.
+    /// </summary>
+    /// <remarks>
+    /// The version number cannot answer "is production current?" — it is hand-maintained and identical
+    /// across a dozen deploys. The sha can, so it is reported alongside it.
+    /// </remarks>
+    public static string Commit => ResolvedCommit;
 
     /// <summary>Seconds since process start, never negative.</summary>
     public static double UptimeSeconds
@@ -40,6 +50,85 @@ public static class ServerRuntimeInfo
             // Some hardened hosts hide process start time; fall back to "first asked" rather than fail liveness.
             return DateTimeOffset.UtcNow;
         }
+    }
+
+    /// <summary>
+    /// Establishes the commit from the build first and the deploy layout second.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Build:</b> <c>dotnet publish -p:SourceRevisionId=&lt;sha&gt;</c> makes the SDK append <c>+&lt;sha&gt;</c>
+    /// to <see cref="AssemblyInformationalVersionAttribute"/>, so a published binary carries its own
+    /// provenance and needs no help from the host.
+    /// </para>
+    /// <para>
+    /// <b>Deploy:</b> the shipped unit runs <c>&lt;root&gt;/current/Pix3.Rooms.Server</c> where <c>current</c>
+    /// is a symlink to <c>releases/&lt;sha&gt;</c>. Resolving that link recovers the sha for binaries published
+    /// before the build stamp existed, which is the only reason this fallback is here.
+    /// </para>
+    /// </remarks>
+    private static string ResolveCommit()
+    {
+        string? informational = typeof(ServerRuntimeInfo).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+
+        if (!string.IsNullOrWhiteSpace(informational))
+        {
+            int plus = informational.IndexOf('+', StringComparison.Ordinal);
+            if (plus >= 0 && plus + 1 < informational.Length)
+            {
+                string suffix = informational[(plus + 1)..];
+                if (LooksLikeCommitSha(suffix))
+                {
+                    return suffix;
+                }
+            }
+        }
+
+        return ResolveCommitFromReleaseDirectory();
+    }
+
+    private static string ResolveCommitFromReleaseDirectory()
+    {
+        try
+        {
+            string baseDirectory = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (baseDirectory.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            DirectoryInfo directory = new(baseDirectory);
+            // ResolveLinkTarget returns null for a real directory, which is the local-build case.
+            FileSystemInfo resolved = directory.ResolveLinkTarget(returnFinalTarget: true) ?? directory;
+            string name = Path.GetFileName(resolved.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+
+            return LooksLikeCommitSha(name) ? name : string.Empty;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            // Provenance is a nicety; failing to read it must never affect the process.
+            return string.Empty;
+        }
+    }
+
+    /// <summary>True for a hex string long enough to be a git object name and not a version folder.</summary>
+    private static bool LooksLikeCommitSha(string value)
+    {
+        if (value.Length is < 7 or > 40)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < value.Length; i++)
+        {
+            if (!Uri.IsHexDigit(value[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string ResolveVersion()

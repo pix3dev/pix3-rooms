@@ -70,11 +70,15 @@ jobs:
       # Self-contained: the host needs no .NET installed, and a runtime upgrade is a deploy, not
       # an apt operation. NOT ReadyToRun - docs/architecture.md rejects it (a long-lived server
       # wants tiered JIT + dynamic PGO in the steady state; startup time is irrelevant here).
+      # SourceRevisionId makes the SDK append `+<sha>` to the informational version, which is what
+      # ServerRuntimeInfo.Commit reports and what /admin/stats compares against the repository's HEAD.
+      # Without it the deployed sha is only recoverable from the releases/<sha> symlink.
       - name: Publish self-contained
         run: |
           set -euo pipefail
           dotnet publish src/Pix3.Rooms.Server/Pix3.Rooms.Server.csproj \
             -c Release -r linux-x64 --self-contained true \
+            -p:SourceRevisionId="${GITHUB_SHA}" \
             -o .deploy/app
           tar -C .deploy/app -czf .deploy/pix3-rooms.tar.gz .
 

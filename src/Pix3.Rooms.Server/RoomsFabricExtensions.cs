@@ -178,6 +178,11 @@ public static class RoomsFabricExtensions
         services.AddSingleton(metricsRegistry);
         services.AddSingleton(new RoomsMetrics(metricsRegistry));
 
+        // Constructed here rather than on the first admin request: its constructor takes the CPU baseline
+        // both of its percentages are measured against, and a dashboard's first poll deserves a real
+        // number instead of the dash a missing baseline would produce.
+        services.AddSingleton(new ResourceSampler());
+
         // ── Auth ──────────────────────────────────────────────────────────────────────────────────
         ValidateEnvironmentPolicy(builder, authOptions, configuration);
 
@@ -330,7 +335,10 @@ public static class RoomsFabricExtensions
 
         app.MapHealthEndpoint();
         app.MapMetricsEndpoint();
-        app.MapRoomAdminApi();
+
+        // Mapped onto the admin group rather than beside it, so it inherits the service-token filter:
+        // resource use and the room roster are operator data, not liveness data.
+        app.MapRoomAdminApi().MapServerStatsEndpoint();
 
         return app;
     }

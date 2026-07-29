@@ -23,6 +23,18 @@ docs/                      architecture + protocol
 
 Requires the **.NET 10 SDK**. The solution uses the new `.slnx` format.
 
+## Versioning
+
+`<Version>` in [`Directory.Build.props`](Directory.Build.props) is the **pix3 platform version** — the same number the editor, `@pix3/runtime` and the cloud backend carry, so `rooms 1.2.0` and `editor 1.2.0` are one release of one product. Every project inherits it; `/health`, `/admin/stats` and the identity line on `/` report it.
+
+Three rules around it:
+
+- **It is a product number, not an API promise.** Read the change log, not the minor digit.
+- **Bump it by hand when the platform bumps.** pix3's `prebuild` stamps its own workspaces, and a sibling repository is deliberately outside its reach — writing into another checkout during a build is worse than a forgotten bump. And a forgotten bump is visible: `cloud.pix3.dev/admin`'s dashboard reads this property straight from the repository and flags rooms disagreeing with cloud.
+- **It is unrelated to `ProtocolVersion`**, which is the wire contract and moves only when the bytes do. Never bump one because the other moved.
+
+What actually proves which build is live is the **commit**, not the version: CI publishes with `-p:SourceRevisionId=$GITHUB_SHA`, so the informational version becomes `1.2.0+<sha>` and `/admin/stats` reports that sha for comparison against the repository's `HEAD`.
+
 ## Run
 
 ```bash
@@ -60,8 +72,11 @@ dotnet run --project tools/Pix3.Rooms.LoadGen -- \
 | `POST /admin/rooms` | `X-Service-Token` | create a room |
 | `GET /admin/rooms`, `GET /admin/rooms/{id}` | `X-Service-Token` | list / inspect |
 | `DELETE /admin/rooms/{id}` | `X-Service-Token` | destroy |
+| `GET /admin/stats` | `X-Service-Token` | version + commit, process/host resource use, transport counters, every live room — one JSON body for an operations dashboard |
 | `GET /health` | none | liveness |
 | `GET /metrics` | optional service token | Prometheus text |
+
+`/admin/stats` is not a second `/metrics`: alerting belongs on the Prometheus families, but a dashboard would otherwise have to parse exposition text and re-derive per-room rows from label sets. Its host numbers come from `/proc` (readable through `ProtectProc=invisible`) and are `null` on a platform without it. `cloud.pix3.dev`'s management dashboard is its consumer.
 
 ## Deploy
 
