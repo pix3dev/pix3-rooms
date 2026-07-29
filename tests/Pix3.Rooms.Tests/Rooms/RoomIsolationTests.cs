@@ -269,4 +269,87 @@ public sealed class RoomIsolationTests : IDisposable
         Assert.True(connection.IsOpen);
         Assert.Null(connection.CloseCode);
     }
+
+    /// <summary>Every roster chunk a connection was sent, in arrival order.</summary>
+    private static RoomRosterEvent[] RosterChunks(FakeClientConnection connection)
+        => connection.FramesOfType(MessageTypeIds.RoomRosterEvent)
+            .Select(frame => MemoryPackSerializer.Deserialize<RoomRosterEvent>(frame.AsSpan(1))!)
+            .ToArray();
+
+    /// <summary>The (clientId, displayName) pairs a roster carries, ordered so the test is deterministic.</summary>
+    private static (uint ClientId, string DisplayName)[] RosterEntries(IEnumerable<RoomRosterEvent> chunks)
+        => chunks
+            .SelectMany(chunk => chunk.ClientIds.Zip(chunk.DisplayNames))
+            .Select(pair => (pair.First, pair.Second))
+            .OrderBy(entry => entry.First)
+            .ToArray();
+
+    [Fact]
+    public void A_joiner_is_told_the_whole_roster_including_itself()
+    {
+        // A joiner is excluded from its own PeerJoinedEvent fan-out, so this is the only way it ever
+        // learns who was already in the room.
+        Room room = StartRoom("roster");
+        FakeClientConnection first = Join(room, 1, "first");
+        WaitFor(() => first.CountOfType(MessageTypeIds.RoomRosterEvent) == 1, "the first member's own roster");
+
+        Assert.Equal([(1u, "first")], RosterEntries(RosterChunks(first)));
+
+        FakeClientConnection second = Join(room, 2, "second");
+        WaitFor(() => second.CountOfType(MessageTypeIds.RoomRosterEvent) == 1, "the second member's roster");
+
+        RoomRosterEvent[] chunks = RosterChunks(second);
+        Assert.True(FrameFlags.IsFinal(chunks[^1].FrameFlags));
+        Assert.Equal([(1u, "first"), (2u, "second")], RosterEntries(chunks));
+
+        // Members already present are told about the join by PeerJoinedEvent, never by a second roster.
+        Thread.Sleep(150);
+        Assert.Equal(1, first.CountOfType(MessageTypeIds.RoomRosterEvent));
+    }
+
+    [Fact]
+    public void A_roster_too_big_for_one_frame_is_chunked_and_only_the_last_chunk_is_final()
+    {
+        // 120 members with 32-character names is ~5.3 KiB of roster: past the 4 KiB control-frame cap,
+        // which is the whole reason the roster is a message of its own rather than a WelcomeEvent field.
+        const int members = 120;
+        string longName = new('x', 32);
+
+        Room room = StartRoom("roster-chunks", maxPlayers: members + 1);
+        for (uint id = 1; id <= members; id++)
+        {
+            Join(room, id, longName);
+        }
+
+        FakeClientConnection last = Join(room, members + 1, "last");
+        WaitFor(
+            () => RosterChunks(last) is { Length: > 0 } chunks && FrameFlags.IsFinal(chunks[^1].FrameFlags),
+            "a complete chunked roster");
+
+        RoomRosterEvent[] roster = RosterChunks(last);
+        Assert.True(roster.Length > 1, $"expected the roster to be split, got {roster.Length} chunk(s)");
+
+        for (int i = 0; i < roster.Length - 1; i++)
+        {
+            Assert.False(FrameFlags.IsFinal(roster[i].FrameFlags), $"chunk {i} must not carry Final");
+        }
+
+        foreach (RoomRosterEvent chunk in roster)
+        {
+            Assert.NotEmpty(chunk.ClientIds);
+            Assert.Equal(chunk.ClientIds.Length, chunk.DisplayNames.Length);
+
+            // +1 for the [u8 TypeId] the frame carries in front of the payload.
+            int frameBytes = MemoryPackSerializer.Serialize(chunk).Length + 1;
+            Assert.True(
+                frameBytes <= RoomRosterEvent.MaxPayloadBytes,
+                $"a chunk encoded to {frameBytes} bytes, past the {RoomRosterEvent.MaxPayloadBytes}-byte cap");
+        }
+
+        // Nothing is lost or duplicated across the split: every member is named exactly once.
+        Assert.Equal(members + 1, RosterEntries(roster).Length);
+        Assert.Equal(
+            Enumerable.Range(1, members + 1).Select(id => (uint)id).ToArray(),
+            RosterEntries(roster).Select(entry => entry.ClientId).ToArray());
+    }
 }

@@ -50,9 +50,9 @@ public class ControlMessageContractTests
     [Fact]
     public void The_control_plane_has_the_messages_the_spec_lists()
     {
-        // 16 core + 5 MemoryPacked state (64, 65, 66, 70, 71) + 2 signal (128, 129). The hot-plane
+        // 17 core + 5 MemoryPacked state (64, 65, 66, 70, 71) + 2 signal (128, 129). The hot-plane
         // payloads (67, 68, 69, 130) are hand-packed and deliberately have no class at all.
-        Assert.Equal(23, MemoryPackableMessages().Count());
+        Assert.Equal(24, MemoryPackableMessages().Count());
     }
 
     [Theory]
@@ -157,6 +157,44 @@ public class ControlMessageContractTests
 
         Assert.NotNull(restored);
         Assert.Null(restored.ResumeKey);
+    }
+
+    public static TheoryData<string[]> RosterChunkShapes()
+    {
+        TheoryData<string[]> data = [];
+        data.Add([]);
+        data.Add(["Ada"]);
+        data.Add(["", "Bo"]);                                   // an empty name is a bare 4-byte header
+        data.Add(["Привет"]);                                   // 12 UTF-8 bytes, UTF-16 length 6
+        data.Add([new string('x', 32), new string('ы', 32)]);   // the longest name accepted, both widths
+        data.Add(Enumerable.Repeat("player", 40).ToArray());    // past 127 bytes: 3-byte member lengths
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(RosterChunkShapes))]
+    public void RoomRosterEvent_sizing_matches_what_MemoryPack_actually_writes(string[] displayNames)
+    {
+        // The room splits a roster by asking these helpers where the next entry stops fitting, so a
+        // disagreement with the codec is an oversized control frame — the exact failure the 4 KiB cap
+        // exists to prevent, and one no round-trip test would catch.
+        int displayNamesSize = RoomRosterEvent.EmptyDisplayNamesSize;
+        foreach (string name in displayNames)
+        {
+            displayNamesSize += RoomRosterEvent.EncodedDisplayNameSize(name);
+        }
+
+        RoomRosterEvent chunk = new()
+        {
+            ClientIds = new uint[displayNames.Length],
+            DisplayNames = displayNames,
+            FrameFlags = FrameFlags.Final,
+        };
+
+        // +1 for the [u8 TypeId] the frame carries in front of the payload.
+        int actual = MemoryPackSerializer.Serialize(chunk).Length + 1;
+
+        Assert.Equal(actual, RoomRosterEvent.EncodedFrameSize(displayNames.Length, displayNamesSize));
     }
 
     [Fact]

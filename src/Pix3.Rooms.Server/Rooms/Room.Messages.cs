@@ -488,6 +488,94 @@ public sealed partial class Room
         SendTo(member.ClientId, MessageTypeIds.RoomVarsChangedEvent, full);
     }
 
+    // ── Roster ────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sends the complete room roster to a joiner — and to a resumed session, whose copy may have gone
+    /// stale while it was away.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The roster <b>includes the recipient itself</b> and is room-scoped, never AOI-scoped, exactly
+    /// like the <c>PeerJoinedEvent</c>/<c>PeerLeftEvent</c> pair it completes. A resume gets the full
+    /// set for the same reason it gets the full room-var set: members may have joined or left during
+    /// the grace, and a resumed client must not reset its local state to find out.
+    /// </para>
+    /// <para>
+    /// <b>Chunked against the frame cap, computed rather than guessed.</b> A display name is up to 32
+    /// <i>characters</i>, which is up to 128 UTF-8 <i>bytes</i>, so a fixed entry count would either
+    /// waste most of a frame or overflow it. Each chunk is filled while its exact encoded size still
+    /// fits, and only the last one carries <c>FrameFlags.Final</c>. One chunk always goes out, even
+    /// for an impossible empty roster, so the client is never left waiting for a completion.
+    /// </para>
+    /// </remarks>
+    private void SendRoomRoster(RoomMember recipient)
+    {
+        // Membership may have moved since the tick's first refresh (a leave processed earlier in this
+        // very tick), and the roster must be the set as it is now.
+        RefreshMemberList();
+
+        int budget = Math.Min(_options.MaxFrameBytes, RoomRosterEvent.MaxPayloadBytes);
+        int start = 0;
+
+        while (true)
+        {
+            int displayNamesSize = RoomRosterEvent.EmptyDisplayNamesSize;
+            int end = start;
+
+            // At least one member per chunk regardless of the budget: a chunk that fits nothing would
+            // loop forever, and a single entry can never approach 4 KiB.
+            while (end < _memberCount)
+            {
+                int nameSize = RoomRosterEvent.EncodedDisplayNameSize(_memberList[end].Connection.DisplayName);
+                if (end > start
+                    && RoomRosterEvent.EncodedFrameSize(end - start + 1, displayNamesSize + nameSize) > budget)
+                {
+                    break;
+                }
+
+                displayNamesSize += nameSize;
+                end++;
+            }
+
+            bool final = end >= _memberCount;
+            SendRosterChunk(recipient, start, end, final);
+
+            if (final)
+            {
+                return;
+            }
+
+            start = end;
+        }
+    }
+
+    /// <summary>Sends members <c>[start, end)</c> as one self-contained roster chunk.</summary>
+    private void SendRosterChunk(RoomMember recipient, int start, int end, bool final)
+    {
+        int count = end - start;
+        var clientIds = new uint[count];
+        var displayNames = new string[count];
+
+        for (int i = 0; i < count; i++)
+        {
+            RoomMember member = _memberList[start + i];
+            clientIds[i] = member.ClientId;
+            displayNames[i] = member.Connection.DisplayName;
+        }
+
+        // A join is rare enough to deserve its own event instance rather than the shared scratch, and
+        // the arrays are chunk-sized anyway — the same trade SendFullRoomVars makes.
+        var chunk = new RoomRosterEvent
+        {
+            ClientIds = clientIds,
+            DisplayNames = displayNames,
+            FrameFlags = final ? Protocol.FrameFlags.Final : Protocol.FrameFlags.None,
+        };
+
+        SendTo(recipient.ClientId, MessageTypeIds.RoomRosterEvent, chunk);
+    }
+
     // ── Signals ───────────────────────────────────────────────────────────────
 
     /// <summary>

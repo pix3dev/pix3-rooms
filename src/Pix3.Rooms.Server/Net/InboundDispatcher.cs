@@ -495,6 +495,7 @@ public sealed class InboundDispatcher
         or MessageTypeIds.ChatMessageEvent
         or MessageTypeIds.RoomVarsChangedEvent
         or MessageTypeIds.HostChangedEvent
+        or MessageTypeIds.RoomRosterEvent
         or MessageTypeIds.SpawnEntityResponse
         or MessageTypeIds.SnapshotPacket
         or MessageTypeIds.DeltaPacket

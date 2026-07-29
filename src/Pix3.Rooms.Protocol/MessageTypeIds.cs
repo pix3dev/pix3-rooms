@@ -97,6 +97,12 @@ public static class MessageTypeIds
     /// <summary>S→C <see cref="Protocol.HostChangedEvent"/>. Host migration announcement.</summary>
     public const byte HostChangedEvent = 16;
 
+    /// <summary>
+    /// S→C <see cref="Protocol.RoomRosterEvent"/>. The complete membership, including the recipient,
+    /// chunked with <c>Final</c>. Sent on every join and every resume.
+    /// </summary>
+    public const byte RoomRosterEvent = 17;
+
     // ── State sync: entities (64–127) ─────────────────────────────────────────
 
     /// <summary>C→S <see cref="Protocol.SpawnEntityRequest"/>.</summary>
@@ -170,6 +176,7 @@ public static class MessageTypeIds
         ResyncCommand => nameof(ResyncCommand),
         SetClientPrefsCommand => nameof(SetClientPrefsCommand),
         HostChangedEvent => nameof(HostChangedEvent),
+        RoomRosterEvent => nameof(RoomRosterEvent),
         SpawnEntityRequest => nameof(SpawnEntityRequest),
         SpawnEntityResponse => nameof(SpawnEntityResponse),
         DespawnEntityCommand => nameof(DespawnEntityCommand),

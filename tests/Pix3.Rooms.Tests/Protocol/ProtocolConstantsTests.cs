@@ -33,6 +33,7 @@ public class ProtocolConstantsTests
         Assert.Equal(14, MessageTypeIds.ResyncCommand);
         Assert.Equal(15, MessageTypeIds.SetClientPrefsCommand);
         Assert.Equal(16, MessageTypeIds.HostChangedEvent);
+        Assert.Equal(17, MessageTypeIds.RoomRosterEvent);
     }
 
     [Fact]

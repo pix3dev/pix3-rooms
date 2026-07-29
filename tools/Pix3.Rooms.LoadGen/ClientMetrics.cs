@@ -107,6 +107,12 @@ public sealed class ClientMetrics
     /// <summary><c>HostChangedEvent</c>s.</summary>
     public int HostChanges;
 
+    /// <summary><c>RoomRosterEvent</c> chunks, of which only the last of a roster carries <c>Final</c>.</summary>
+    public int RosterChunks;
+
+    /// <summary>Rosters completed: chunks that carried <c>Final</c>.</summary>
+    public int RostersCompleted;
+
     /// <summary><c>RoomInfoEvent</c>s (~1 Hz).</summary>
     public int RoomInfoEvents;
 

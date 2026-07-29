@@ -24,9 +24,13 @@ namespace Pix3.Rooms.Server.Rooms;
 /// </para>
 /// <para>
 /// <b>Tick order.</b> Expire resume graces → pending leaves (entity policy + host migration + peer
-/// announce) → pending admissions (subscribe + room vars + peer announce) → drain inbound (capped) →
-/// <see cref="RoomReplication.Tick"/> → per member: pending snapshot frames <i>or</i> delta, then its
-/// signal batch → ~1 Hz <c>RoomInfoEvent</c> and counter publish → record tick body time.
+/// announce) → pending admissions (subscribe + room vars + roster + peer announce) → drain inbound
+/// (capped) → <see cref="RoomReplication.Tick"/> → per member: pending snapshot frames <i>or</i> delta,
+/// then its signal batch → ~1 Hz <c>RoomInfoEvent</c> and counter publish → record tick body time.
+/// </para>
+/// <para>
+/// <b>Admission fan-out order.</b> <c>RoomVarsChangedEvent</c>, then <c>RoomRosterEvent</c> (chunked,
+/// only the last chunk <c>Final</c>), then the snapshot the state fan-out emits later in the same tick.
 /// </para>
 /// <para>
 /// <b>Allocations.</b> A steady-state tick allocates nothing: the member list is a reused array refreshed
@@ -906,6 +910,11 @@ public sealed partial class Room : IRoom, IDisposable
             RebindFocus(member, member.FirstOwnedEntity);
 
             SendFullRoomVars(member);
+
+            // After the room vars and before the snapshot, on a join and on a resume alike: a client is
+            // never in its own PeerJoinedEvent fan-out, and a resume may have missed a join or a leave
+            // during its grace.
+            SendRoomRoster(member);
 
             if (admission.IsResume)
             {
