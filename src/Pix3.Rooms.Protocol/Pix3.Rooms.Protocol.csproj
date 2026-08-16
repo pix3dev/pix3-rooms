@@ -4,6 +4,11 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- Apache-2.0, unlike the server next door. The wire contract is an interface, not the
+         product, and a complete independent implementation of it already ships under Apache-2.0
+         in @pix3/runtime. Anyone may implement this protocol on either side of the wire. -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>

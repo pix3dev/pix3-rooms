@@ -9,6 +9,10 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+
+    <!-- Apache-2.0: a reference client for the open protocol, not part of the commercial server.
+         See the repository LICENSE for the scope split. -->
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
   </PropertyGroup>
 
 </Project>

@@ -4,6 +4,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- Proprietary: this is the product. See the repository LICENSE for the scope split.
+         Deliberately NOT packable — a commercial component should not be one `dotnet pack`
+         away from being pushed to a public feed. -->
+    <PackageLicenseExpression></PackageLicenseExpression>
+    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

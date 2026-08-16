@@ -24,4 +24,40 @@
     <GarbageCollectionAdaptationMode>0</GarbageCollectionAdaptationMode>
   </PropertyGroup>
 
+  <!-- Refuse to publish while a licence file still carries an unresolved placeholder.
+
+       The copyright holder in LICENSE / NOTICE is a public assertion of ownership, and it is
+       deliberately left as a marker until ownership has actually been settled (see CONTRIBUTING.md).
+       This target exists so that "we'll fill it in later" cannot quietly become "we shipped it with
+       a placeholder".
+
+       It runs on Publish, not on Build: an inner-loop `dotnet build` or `dotnet test` should not be
+       blocked by an open legal question, but nothing may leave the machine with markers in it.
+       To bypass for a deliberate local publish: -p:AllowTbdCopyright=true -->
+  <Target Name="CheckCopyrightPlaceholders"
+          BeforeTargets="Publish"
+          Condition="'$(AllowTbdCopyright)' != 'true'">
+    <PropertyGroup>
+      <_RepoRoot>$(MSBuildThisFileDirectory)</_RepoRoot>
+      <_LicRoot>$(_RepoRoot)LICENSE</_LicRoot>
+      <_LicNotice>$(_RepoRoot)NOTICE</_LicNotice>
+      <_LicProtocol>$(_RepoRoot)src/Pix3.Rooms.Protocol/LICENSE</_LicProtocol>
+      <_LicLoadGen>$(_RepoRoot)tools/Pix3.Rooms.LoadGen/LICENSE</_LicLoadGen>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(_LicRoot)')" Text="Licence file is missing: $(_LicRoot)" />
+    <Error Condition="!Exists('$(_LicNotice)')" Text="Licence file is missing: $(_LicNotice)" />
+    <Error Condition="!Exists('$(_LicProtocol)')" Text="Licence file is missing: $(_LicProtocol)" />
+    <Error Condition="!Exists('$(_LicLoadGen)')" Text="Licence file is missing: $(_LicLoadGen)" />
+
+    <!-- Read each file into its own property and concatenate. Item batching with %(FullPath) is not
+         usable inside a PropertyGroup (MSB4095), hence the explicit spelling. -->
+    <PropertyGroup>
+      <_LicenceText>$([System.IO.File]::ReadAllText('$(_LicRoot)'))$([System.IO.File]::ReadAllText('$(_LicNotice)'))$([System.IO.File]::ReadAllText('$(_LicProtocol)'))$([System.IO.File]::ReadAllText('$(_LicLoadGen)'))</_LicenceText>
+    </PropertyGroup>
+
+    <Error Condition="$(_LicenceText.Contains('__COPYRIGHT_HOLDER_TBD__')) or $(_LicenceText.Contains('__CONTACT_EMAIL_TBD__'))"
+           Text="Licence files still contain an unresolved placeholder (__COPYRIGHT_HOLDER_TBD__ / __CONTACT_EMAIL_TBD__). The copyright holder has not been settled — see CONTRIBUTING.md. Resolve the markers, or publish with -p:AllowTbdCopyright=true to bypass deliberately." />
+  </Target>
+
 </Project>

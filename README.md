@@ -161,6 +161,21 @@ The artifact is ~35 MB gzipped because it carries the runtime. Dropping `--self-
 
 Not yet: the runtime's `NetworkService` and replicated-transform components, the editor's "Play Online" flow, Level-2 server-side rules (movement validation, match flow, score), Level-3 user server scripts (headless `@pix3/runtime` in sandboxed workers), multi-node fabric, WebTransport. See the plan for sequencing.
 
+## License
+
+This repository is licensed in **two parts** — see [`LICENSE`](LICENSE) for the exact scope.
+
+| Part | License |
+|---|---|
+| [`src/Pix3.Rooms.Protocol/`](src/Pix3.Rooms.Protocol/) — the wire contract | [Apache-2.0](src/Pix3.Rooms.Protocol/LICENSE) |
+| [`tools/Pix3.Rooms.LoadGen/`](tools/Pix3.Rooms.LoadGen/) — reference bot client | [Apache-2.0](tools/Pix3.Rooms.LoadGen/LICENSE) |
+| [`docs/protocol.md`](docs/protocol.md) + [`docs/protocol-vectors.json`](docs/protocol-vectors.json) | Apache-2.0 |
+| [`src/Pix3.Rooms.Server/`](src/Pix3.Rooms.Server/) — the Room Fabric server | Commercial — free for evaluation and internal non-production use |
+
+**The protocol is open on purpose.** It is an interface, not the product, and the byte-exact spec plus a complete independent client implementation already ship under Apache-2.0 in `@pix3/runtime`. You may implement this protocol on either side of the wire, including in a competing server. What is licensed commercially is *this* server: room lifecycle, AOI replication, quotas, multi-tenancy, operations.
+
+Third-party components: [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) — two runtime packages, both MIT. Contributions require a CLA, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Lineage
 
 The predecessor experiment [`WsCore`](https://github.com/gritsenko/WsCore) informed the socket layer (frame reassembly, bounded per-connection send queues, `[TypeId][payload]` framing). This repo is a clean start: rooms are genuinely isolated units of state and scheduling, authentication is mandatory, and AOI is part of the core rather than a claim in a README.

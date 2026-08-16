@@ -1,0 +1,35 @@
+Pix3 Rooms
+Copyright 2026 __COPYRIGHT_HOLDER_TBD__
+
+This NOTICE applies to the Apache-2.0 portion of this repository:
+
+    src/Pix3.Rooms.Protocol/
+    tools/Pix3.Rooms.LoadGen/
+    docs/protocol.md
+    docs/protocol-vectors.json
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+these files except in compliance with the License. You may obtain a copy of the
+License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+--------------------------------------------------------------------------------
+
+The rest of the repository — notably src/Pix3.Rooms.Server/ — is proprietary.
+See LICENSE for the scope split and the commercial terms.
+
+The protocol implemented here is also implemented, independently and under
+Apache-2.0, by the TypeScript client in `@pix3/runtime`
+(packages/pix3-runtime/src/net/protocol/). The two share the same golden wire
+vectors; both copies are Apache-2.0.
+
+"Pix3" and the Pix3 logo are trademarks. The Apache-2.0 licence grants rights in
+the software, not in the name or the marks.
+
+Third-party components and their licences are listed in THIRD-PARTY-NOTICES.md.

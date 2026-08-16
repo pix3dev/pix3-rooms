@@ -21,7 +21,16 @@
            bump shows up on the dashboard as rooms disagreeing with cloud.
          - It has nothing to do with ProtocolVersion, which is the wire contract and moves only when
            the bytes change. Never bump one because the other moved. -->
-    <Version>1.3.0</Version>
+    <Version>1.4.1</Version>
+
+    <!-- Licensing is SPLIT across this repository, so each project sets its own
+         PackageLicenseExpression rather than inheriting one from here:
+           src/Pix3.Rooms.Protocol   Apache-2.0   (the wire contract is an open interface)
+           tools/Pix3.Rooms.LoadGen  Apache-2.0   (reference client)
+           src/Pix3.Rooms.Server     proprietary  (the product)
+         See LICENSE for the scope split and why the protocol is deliberately not proprietary. -->
+    <Copyright>Copyright 2026 __COPYRIGHT_HOLDER_TBD__</Copyright>
+    <Product>Pix3 Rooms</Product>
   </PropertyGroup>
 
   <!-- The GC settings that used to live here moved to Directory.Build.targets: $(OutputType) is
