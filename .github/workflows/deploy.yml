@@ -76,9 +76,20 @@ jobs:
       - name: Publish self-contained
         run: |
           set -euo pipefail
+          # AllowTbdCopyright bypasses the CheckCopyrightPlaceholders gate in
+          # Directory.Build.targets. The gate is right to exist and this is a deliberate,
+          # temporary waiver: the copyright holder is not settled yet, and production must not be
+          # held at an older build over an open legal question. The cost is narrow but real - the
+          # assembly Copyright attribute ships reading __COPYRIGHT_HOLDER_TBD__. This host is ours,
+          # not a distribution channel, so nothing reaches a third party.
+          #
+          # REMOVE THIS FLAG once the holder is resolved in LICENSE, NOTICE and Directory.Build.props.
+          # Left in place it silently disarms the gate for every future deploy, which is the exact
+          # failure it was written to prevent.
           dotnet publish src/Pix3.Rooms.Server/Pix3.Rooms.Server.csproj \
             -c Release -r linux-x64 --self-contained true \
             -p:SourceRevisionId="${GITHUB_SHA}" \
+            -p:AllowTbdCopyright=true \
             -o .deploy/app
           tar -C .deploy/app -czf .deploy/pix3-rooms.tar.gz .
 
