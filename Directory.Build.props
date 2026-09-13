@@ -21,7 +21,7 @@
            bump shows up on the dashboard as rooms disagreeing with cloud.
          - It has nothing to do with ProtocolVersion, which is the wire contract and moves only when
            the bytes change. Never bump one because the other moved. -->
-    <Version>1.4.1</Version>
+    <Version>1.6.0</Version>
 
     <!-- Licensing is SPLIT across this repository, so each project sets its own
          PackageLicenseExpression rather than inheriting one from here:
