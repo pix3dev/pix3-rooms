@@ -33,6 +33,8 @@ jobs:
       DEPLOY_PORT: 22
       DEPLOY_USER: ${{ secrets.ROOMS_DEPLOY_USER }}
       DEPLOY_PATH: ${{ secrets.ROOMS_DEPLOY_PATH }}
+      SSH_KEY_PATH: ${{ runner.temp }}/rooms-deploy-key
+      SSH_KNOWN_HOSTS_PATH: ${{ runner.temp }}/rooms-known-hosts
       # Loopback address the unit binds to, polled after the restart.
       HEALTH_URL: http://127.0.0.1:5011/health
 
@@ -97,29 +99,24 @@ jobs:
       - name: Configure SSH
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.ROOMS_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          cat > ~/.ssh/config <<EOF
-          Host ${DEPLOY_HOST}
-            IdentityFile ~/.ssh/id_ed25519
-            IdentitiesOnly yes
-            BatchMode yes
-          EOF
-          chmod 600 ~/.ssh/config
-          ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.ROOMS_DEPLOY_SSH_KEY }}" > "$SSH_KEY_PATH"
+          chmod 600 "$SSH_KEY_PATH"
+          ssh-keyscan -p "${DEPLOY_PORT:-22}" -H "$DEPLOY_HOST" > "$SSH_KNOWN_HOSTS_PATH"
 
       - name: Upload release bundle
         run: |
           set -euo pipefail
-          scp -P "${DEPLOY_PORT:-22}" .deploy/pix3-rooms.tar.gz \
+          scp -i "$SSH_KEY_PATH" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_PATH" \
+            -P "${DEPLOY_PORT:-22}" .deploy/pix3-rooms.tar.gz \
             "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/pix3-rooms-${GITHUB_SHA}.tar.gz"
 
       - name: Activate release
         run: |
           set -euo pipefail
-          ssh -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
+          ssh -i "$SSH_KEY_PATH" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o UserKnownHostsFile="$SSH_KNOWN_HOSTS_PATH" \
+            -p "${DEPLOY_PORT:-22}" "${DEPLOY_USER}@${DEPLOY_HOST}" \
             "DEPLOY_ROOT='${DEPLOY_PATH}' RELEASE_SHA='${GITHUB_SHA}' HEALTH_URL='${HEALTH_URL}' bash -s" <<'EOF'
           set -euo pipefail
 
