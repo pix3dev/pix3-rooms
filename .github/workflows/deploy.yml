@@ -23,13 +23,13 @@ concurrency:
 jobs:
   deploy:
     name: Publish and deploy to rooms.pix3.dev
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, rooms, deploy, home]
     timeout-minutes: 30
     environment: production
 
     env:
-      DEPLOY_HOST: rooms.pix3.dev
-      DEPLOY_PORT: ${{ secrets.ROOMS_DEPLOY_PORT }}
+      DEPLOY_HOST: 192.168.1.208
+      DEPLOY_PORT: 22
       DEPLOY_USER: ${{ secrets.ROOMS_DEPLOY_USER }}
       DEPLOY_PATH: ${{ secrets.ROOMS_DEPLOY_PATH }}
       # Loopback address the unit binds to, polled after the restart.
