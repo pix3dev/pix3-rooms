@@ -28,6 +28,7 @@ jobs:
     environment: production
 
     env:
+      DOTNET_INSTALL_DIR: /opt/dotnet
       DEPLOY_HOST: 192.168.1.208
       DEPLOY_PORT: 22
       DEPLOY_USER: ${{ secrets.ROOMS_DEPLOY_USER }}
